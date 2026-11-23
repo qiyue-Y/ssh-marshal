@@ -115,7 +115,7 @@ class KilllistHits(AssertBlockedMixin, unittest.TestCase):
             "iptables -P OUTPUT DROP",
             "iptables -P FORWARD DROP",
             "chpasswd",
-            "usermod -L qy",
+            "usermod -L testuser",
         )
 
     def test_data_and_virtualization(self):
@@ -202,7 +202,7 @@ class BenignCommandsPass(AssertBlockedMixin, unittest.TestCase):
     def test_read_redirects_are_not_writes(self):
         """`<` 是读重定向、`<<<` 是 here-string，都不写文件——曾把 `wc -l < 密钥文件` 误拦（2026-10-14）。"""
         self.assertPasses(
-            "wc -l < /home/qy/.ssh/authorized_keys",
+            "wc -l < /home/testuser/.ssh/authorized_keys",
             "grep x < /etc/shadow",
             "wc -l < /etc/passwd",
         )

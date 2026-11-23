@@ -77,7 +77,7 @@
 
 **已落地（2026-10-14，ab160ef）**：detach 已实现，长任务改走它。60 秒数字另有 8 个历史样本复核（客户端报错时刻 − 审计 intent 时刻 = 60.4–60.9s）；默认 `max_duration_s` 300s 未动。
 
-- **现状与痛点**：`ISSUES.md` 那条「静默长任务仍会被默认 300s 砍断」的正解写了「传个大 `max_duration` 就能跑完」。本次在 10.81.2.100 上实测到一个**服务端管不到的新事实**：从 Agent 侧发起调用时，MCP 客户端层自身约 60 秒就会中断调用，返回 `MCP tool invocation did not complete`，此时 `max_duration=900` 也没用。实测样本：远端跑 25s、55s 的命令能正常拿到结果；70s、120s、320s 的那几次全部丢结果（`npm i -g @deepseek-ai/dsh`、40×8s 轮询循环各撞一次），而远端进程照常在跑。
+- **现状与痛点**：`ISSUES.md` 那条「静默长任务仍会被默认 300s 砍断」的正解写了「传个大 `max_duration` 就能跑完」。本次在内网一台真机上实测到一个**服务端管不到的新事实**：从 Agent 侧发起调用时，MCP 客户端层自身约 60 秒就会中断调用，返回 `MCP tool invocation did not complete`，此时 `max_duration=900` 也没用。实测样本：远端跑 25s、55s 的命令能正常拿到结果；70s、120s、320s 的那几次全部丢结果（`npm i -g @deepseek-ai/dsh`、40×8s 轮询循环各撞一次），而远端进程照常在跑。
 - **建议做法**：把 M2 的 `detach` 优先级提上来，语义按「调用必须短」设计：`exec(detach=true)` 立刻返回 `job_id`，配 `job_status(job_id)` / `job_output(job_id, offset, tail_bytes, max_bytes)` / `job_kill(job_id)`。这样任何一次调用都远在 60 秒以内，长任务的完成与否由轮询判断，不再依赖"服务端超时够大"。
 - **预期收益**：一次性解决三类问题——长任务结果丢失、判活要靠手写 shell 轮询、以及 `idle_timeout` 按输出判活带来的误杀。
 - **外部设计参照**（本次实测取的样本）：`classfang/ssh-mcp-server` v1.10.0 只有 10 个工具，其中 `job-start / job-status / job-kill / job-list` 就是这套语义，且 `job-status` 的入参是 `jobId, offset, tailBytes, maxBytes`（分页 + 单次响应字节上限），`read-file` 也用 `offset, length`。可直接抄它的接口形状，落盘层复用现成的 `output_store`。
@@ -89,7 +89,7 @@
 
 **按方案 A 落地（2026-10-14）**：不新增工具，README 新增「判活」一节把规矩写死（跨用户判活带 elevate、`pgrep -x` 取 PID 且与 kill 分两条、长任务改 detach 轮询）。detach 也吃掉了本条的长任务那半边。
 
-- **现状与痛点**：工具没有"等进程结束/等文件出现"的语义，Agent 只能自己拼 shell。实测两个坑：① 用 qy 执行 `kill -0 <root 的 PID>` 判活返回 **EPERM**，看起来像"进程已退出"，据此误判了一次 apt 已结束（其实还在下载并持有 dpkg 锁）；② `pgrep -f '<模式>'` 会匹配到**承载这条 pgrep 自己的 `bash -c` 命令行**，导致轮询循环永不退出并虚报存活。
+- **现状与痛点**：工具没有"等进程结束/等文件出现"的语义，Agent 只能自己拼 shell。实测两个坑：① 用普通用户执行 `kill -0 <root 的 PID>` 判活返回 **EPERM**，看起来像"进程已退出"，据此误判了一次 apt 已结束（其实还在下载并持有 dpkg 锁）；② `pgrep -f '<模式>'` 会匹配到**承载这条 pgrep 自己的 `bash -c` 命令行**，导致轮询循环永不退出并虚报存活。
 - **建议做法**：给 `exec` 加 `wait_pid=<pid>` / `wait_file=<path>` 语义（内部用 `/proc` 判活并按 `idle_timeout` 心跳输出），或在 README「判活」一节写死：跨用户判活必须带 `elevate`，且 `pgrep -f` 的模式不得与自身命令行重合。
 - **预期收益**：消掉两类静默误判——这两类都不是报错，是**返回了错误的结论**，比报错更贵。
 - **代价与风险**：`wait_*` 若做成阻塞调用会重新撞上 60 秒上限，必须做成"查一次就返回"的非阻塞探针。

@@ -252,14 +252,14 @@ class WriteTargetGuard(unittest.TestCase):
     """SFTP 的写不经过命令串，必须由传输自己走同一份敏感名单。"""
 
     def test_sensitive_targets_blocked(self):
-        for p in ("/home/qy/.ssh/authorized_keys", "~/.ssh/authorized_keys", "/etc/ssh/sshd_config",
+        for p in ("/home/testuser/.ssh/authorized_keys", "~/.ssh/authorized_keys", "/etc/ssh/sshd_config",
                   "/etc/sudoers", "x/fstab"):
             hit = G.check_write_target(p)
             self.assertIsNotNone(hit, f"应当拦下：{p}")
             self.assertIn("写入敏感文件", hit.rule)
 
     def test_ordinary_targets_pass(self):
-        for p in ("/tmp/build.log", "/home/qy/app/config.yaml", "/var/tmp/x.part", "/home/qy/report.pdf"):
+        for p in ("/tmp/build.log", "/home/testuser/app/config.yaml", "/var/tmp/x.part", "/home/testuser/report.pdf"):
             self.assertIsNone(G.check_write_target(p), f"不该拦：{p}")
 
     def test_root_spellings_normalized(self):

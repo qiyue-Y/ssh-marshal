@@ -55,7 +55,7 @@ import ssh_guard as G  # noqa: E402
 import ssh_mcp as M  # noqa: E402
 import output_store as OS  # noqa: E402
 
-REAL_IP = "10.81.2.100"
+REAL_IP = os.environ.get("SSHMCP_TEST_REAL_IP", "192.0.2.100")  # 真机握手用例用；默认文档保留地址，不可达就 skip
 WRONG_FP = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
@@ -373,7 +373,7 @@ class ExecWiring(unittest.TestCase):
 class Elevate(unittest.TestCase):
     """提权：配置里 elevate 才是能力位，一旦提权，非 root 主机也恒查清单。"""
 
-    CRED = {"address": REAL_IP, "username": "qy", "auth": "password", "password": "login-secret", "hostKey": WRONG_FP}
+    CRED = {"address": REAL_IP, "username": "testuser", "auth": "password", "password": "login-secret", "hostKey": WRONG_FP}
 
     def setUp(self):
         reset_pins()
@@ -401,7 +401,7 @@ class Elevate(unittest.TestCase):
         self.assertFalse(res.get("blocked", False))
 
     def test_sudo_wrap_keeps_the_password_out_of_argv(self):
-        cred = M.HostCred(alias="x", address="1", username="qy", password="login-secret", elevate=True)
+        cred = M.HostCred(alias="x", address="1", username="testuser", password="login-secret", elevate=True)
         inner = "cd '/root' && id"
         wrapped = M._sudo_wrap(inner, cred)
         self.assertIn("sudo -S -p '' --user root -- sh -c", wrapped)
@@ -414,21 +414,21 @@ class Elevate(unittest.TestCase):
         self.assertEqual(tokens[7:], ["sh", "-c", inner])
 
     def test_password_defaults_to_login_password(self):
-        plain = M.HostCred(alias="x", address="1", username="qy", password="login-secret", elevate=True)
+        plain = M.HostCred(alias="x", address="1", username="testuser", password="login-secret", elevate=True)
         self.assertEqual(plain.sudo_password(), "login-secret")
-        other = M.HostCred(alias="x", address="1", username="qy", password="login-secret", elevate=True, elevate_password="root-secret")
+        other = M.HostCred(alias="x", address="1", username="testuser", password="login-secret", elevate=True, elevate_password="root-secret")
         self.assertEqual(other.sudo_password(), "root-secret")
 
     def test_elevate_without_any_password_is_blocked(self):
         """空口令喂给 sudo -S 会一直等输入，最后报成 idle 超时 —— 那是假故障，提前拒。"""
-        write_hosts({"100": {"address": REAL_IP, "username": "qy", "auth": "key", "hostKey": WRONG_FP, "elevate": True}})
+        write_hosts({"100": {"address": REAL_IP, "username": "testuser", "auth": "key", "hostKey": WRONG_FP, "elevate": True}})
         res = M.execute("100", "id", elevate=True)
         self.assertTrue(res["blocked"])
         self.assertEqual(res["reason"], "elevate_password_missing")
 
     def test_channel_gets_password_on_stdin_not_in_command(self):
         """run_command 的提权路径：exec 的是包装串，口令只从 stdin 走。"""
-        cred = M.HostCred(alias="100", address="1", username="qy", password="login-secret", elevate=True, host_key=WRONG_FP)
+        cred = M.HostCred(alias="100", address="1", username="testuser", password="login-secret", elevate=True, host_key=WRONG_FP)
         sent = {}
 
         class FakeChan:
@@ -586,7 +586,7 @@ class KilllistWiring(unittest.TestCase):
 
         def pwd_run(cred, pin, command, cwd, idle_s, max_s, spill, elevate=False, login_shell=False, shell_init=False):
             seen.append(command)
-            spill.write("out", b"/home/qy\n")
+            spill.write("out", b"/home/testuser\n")
             spill.close()
             return M.RunResult(exit_code=0, stdout=spill.inline("out"), stderr="", truncated=False, timed_out=None, output_id=spill.run_id, stats=spill.stats())
 
@@ -595,7 +595,7 @@ class KilllistWiring(unittest.TestCase):
             M.execute("admin", "cd '~/a b'")
             M.execute("admin", "cd")
         self.assertEqual(seen, ["cd ~ && pwd", "cd ~/'a b' && pwd", "cd ~ && pwd"])
-        self.assertEqual(M.POOL.cwd("admin"), "/home/qy")
+        self.assertEqual(M.POOL.cwd("admin"), "/home/testuser")
 
 
 class _FakeHandle:
@@ -625,7 +625,7 @@ class _FakeSftpRead:
         self.content = content
 
     def normalize(self, path):
-        return "/home/qy"
+        return "/home/testuser"
 
     def open(self, path, mode="rb"):
         return _FakeHandle(self.content)
@@ -778,7 +778,7 @@ class SftpStub:
                               "st_uid": 1000, "st_gid": 1000, "st_mtime": 0})()
 
     def normalize(self, path):
-        return "/home/qy"
+        return "/home/testuser"
 
     def mkdir(self, path):
         self.mkdirs.append(path)
@@ -857,7 +857,7 @@ class Handle:
 class TransferWiring(unittest.TestCase):
     """拒绝路径必须离线可钉：真机测一次就变了，不能当回归。"""
 
-    CRED = {"address": REAL_IP, "username": "qy", "auth": "password", "password": "login-secret",
+    CRED = {"address": REAL_IP, "username": "testuser", "auth": "password", "password": "login-secret",
             "hostKey": WRONG_FP, "elevate": True}
 
     def setUp(self):
@@ -874,7 +874,7 @@ class TransferWiring(unittest.TestCase):
         write_hosts({"guarded-user": dict(self.CRED)})
         opened = []
         with mock.patch.object(M, "_sftp_of", side_effect=lambda *a: opened.append(1)):
-            r = M._tool_put_file("guarded-user", str(self.src), "/home/qy/.ssh/authorized_keys")
+            r = M._tool_put_file("guarded-user", str(self.src), "/home/testuser/.ssh/authorized_keys")
         self.assertTrue(r["blocked"])
         self.assertEqual(r["reason"], "killlisted")
         self.assertIn("authorized_keys", r["rule"])
@@ -897,7 +897,7 @@ class TransferWiring(unittest.TestCase):
         stub = SftpStub()
         with mock.patch.object(M, "_sftp_of", return_value=stub), \
              mock.patch.object(M, "_remote_md5", return_value=hashlib.md5(self.src.read_bytes()).hexdigest()):
-            r = M._tool_put_file("100", str(self.src), "/home/qy/.ssh/authorized_keys", overwrite=True)
+            r = M._tool_put_file("100", str(self.src), "/home/testuser/.ssh/authorized_keys", overwrite=True)
         self.assertTrue(r["verified"], str(r))
 
     def test_elevate_not_configured(self):
@@ -959,7 +959,7 @@ class TransferWiring(unittest.TestCase):
     def test_restart_clears_the_staging_part_for_elevated_put(self):
         """elevate 的 part 名与非提权不同：restart 必须删解析后的那个，否则旧暂存被静默复用。"""
         write_hosts({"100": dict(self.CRED)})
-        staging = f"/home/qy/{M.STAGING_DIRNAME}/t.txt{M.X.PART_SUFFIX}"
+        staging = f"/home/testuser/{M.STAGING_DIRNAME}/t.txt{M.X.PART_SUFFIX}"
         stub = SftpStub({staging: bytearray(b"\xff" * (3 * 1048576))})
 
         seen = []

@@ -1011,7 +1011,7 @@ def execute(alias: str, command: str, cwd: str | None = None, idle_timeout: floa
     guard = GUARD.get()
     cd_target = None if detach else _cd_only_segment(command)
     # 清单查不查：root 账号恒查，非 root 看 guarded_hosts 点没点名，提权一律查 ——
-    # 一旦以 root 落地，破坏面和 root 账号完全同级，不该因为登录账号是 qy 就免检
+    # 一旦以 root 落地，破坏面和 root 账号完全同级，不该因为登录账号是普通用户就免检
     # 单独的 cd 只改服务端记的 cwd，不触碰远端状态，也不必查
     guarded = G.applies(cred.privileged, alias, guard, cred.critical) or elevate
     hit = None if cd_target is not None or not guarded else G.check(command, guard)

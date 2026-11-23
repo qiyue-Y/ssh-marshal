@@ -1,5 +1,7 @@
 # ssh-mcp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 让 AI 通过 SSH 管理远程主机：常驻连接、全文日志、可回滚的 MCP 服务。
 
 ## 它是什么
@@ -183,7 +185,7 @@ sudo: A terminal is required to authenticate      # 退出码 1
 sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 ```
 
-`-S` 从 stdin 读口令，`-p ''` 把提示置空（否则 `[sudo] password for qy:` 会污染 stderr）。**口令由服务端写进 channel 的 stdin**，所以它不出现在命令串里 —— 不进远端 `argv`（`ps` 看不到）、不进本机审计、不进远端 shell history。真机硬证据：拿 100 跑 `id -u; id -un`，不提权得 `qy/1000`，提权得 `0/root`；再对审计文件、`output/*.log` 全文、返回值、`list_hosts` 四处搜口令，全部为否。
+`-S` 从 stdin 读口令，`-p ''` 把提示置空（否则 `[sudo] password for user:` 会污染 stderr）。**口令由服务端写进 channel 的 stdin**，所以它不出现在命令串里 —— 不进远端 `argv`（`ps` 看不到）、不进本机审计、不进远端 shell history。真机硬证据：拿 100 跑 `id -u; id -un`，不提权得 `user/1000`，提权得 `0/root`；再对审计文件、`output/*.log` 全文、返回值、`list_hosts` 四处搜口令，全部为否。
 
 凭据文件里的三个字段（那文件只有你能写）：
 
@@ -205,7 +207,7 @@ sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 
 ## 拦截边界（Agent 必读）
 
-`exec(host, command, cwd?, idle_timeout?, max_duration?, force?, elevate?, detach?, force_reason?, login_shell?)` 对任何命令一律放行，只在**受保护主机**上查下面这五类形态。受保护 = `username == "root"`，或凭据里标了 `critical: true`，或别名被 `policy.json` 的 `guarded_hosts` 点名（非 root 也挡一手手滑，比如跑共享业务的 `66`），或本次调用带 `elevate=true`（一旦落到 root，破坏面和 root 账号同级，不因登录账号是 `qy` 而免检）。没点名的非 root 主机（当前是 `100`）零拦截。
+`exec(host, command, cwd?, idle_timeout?, max_duration?, force?, elevate?, detach?, force_reason?, login_shell?)` 对任何命令一律放行，只在**受保护主机**上查下面这五类形态。受保护 = `username == "root"`，或凭据里标了 `critical: true`，或别名被 `policy.json` 的 `guarded_hosts` 点名（非 root 也挡一手手滑，比如跑共享业务的 `66`），或本次调用带 `elevate=true`（一旦落到 root，破坏面和 root 账号同级，不因登录账号是普通用户而免检）。没点名的非 root 主机（当前是 `100`）零拦截。
 
 | 类别 | 条目 |
 |---|---|
@@ -347,7 +349,7 @@ paramiko 默认把数据切成 32KB 的 SFTP 请求（`SFTPFile.MAX_REQUEST_SIZE
 这是文件通道最要紧的一条。`ssh_guard` 只看命令字符串，SFTP 的写不经过它。100 上实测过缺口：
 
 ```
-exec  echo key >> /home/qy/.ssh/authorized_keys  ->  blocked, rule="deny:写入敏感文件 ..."
+exec  echo key >> ~/.ssh/authorized_keys  ->  blocked, rule="deny:写入敏感文件 ..."
 SFTP  open(同一路径, "a")                        ->  成功
 ```
 
@@ -453,5 +455,9 @@ uv run --quiet ssh_mcp.py list      # 主机、guard 是否生效、pin 来源�
 3. 静态分析有地板，见上面「设计上不再防的形态」。包装器与解释器的反绕过机制是主动删掉的，不是漏了。
 4. 引号内的 `>` `<` 已通过掩码排除；`grep a>b`（未加引号）里的 `>` 仍会被当成**写**重定向看一眼 —— 只有撞上那张敏感文件名单才拦，日常不会误杀。`<` / `<<` / `<<<` 不算写（读重定向与 heredoc 不落文件，2026-10-14 起不收进写目标——此前 `wc -l < 密钥文件` 这类只读会被误拦）。
 5. 密码解密后常驻服务进程内存。长期方案是全量转私钥认证。
-6. `username == "root"` 这一条判定分支没有真机证据：唯一配置的 root 主机 `admin`（pve2）在凭据文件里没条目，而真机测试只允许在 100 上跑。**「命中 → 拒且不建连 → force 送到远端 → 审计记 forced」整条链路已在 100 上用 `guarded_hosts` 点名真机验过**（`userdel` 不存在用户返回 exit 6，证明确实执行了），root 分支与非 root 点名分支在代码里是同一个 `G.applies` 谓词，只差那半行。要补的是 `admin` 的凭据，不是代码。
+6. `username == "root"` 这一条判定分支没有真机证据：唯一配置的 root 主机在凭据文件里没条目，而真机测试只允许在 100 上跑。**「命中 → 拒且不建连 → force 送到远端 → 审计记 forced」整条链路已在 100 上用 `guarded_hosts` 点名真机验过**（`userdel` 不存在用户返回 exit 6，证明确实执行了），root 分支与非 root 点名分支在代码里是同一个 `G.applies` 谓词，只差那半行。要补的是那台主机的凭据，不是代码。
 7. 原先被错杀的只读用法现在都能跑了：裸 `mount`（只是打印挂载表）、`fdisk -l`、`docker system prune -af`、`kubectl delete`、`crontab -r`、`history -c`、`sudo`。
+
+## License
+
+MIT

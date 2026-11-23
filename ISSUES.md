@@ -12,7 +12,7 @@
 
 - **症状**：`exec(host, command="cd ~")` 报 `cd: ~: 没有那个文件或目录`（100 实测，exit 1）。根因：探活串用 `shlex.quote(cd_target)` 把 `~` 裹成 `'~'`，远端 shell 不再展开；`cd ~/xxx` 与 `cwd="~/xxx"` 参数同病。另一处：光一个 `cd`（不带参数）此前不匹配 cd-only 分支，跑完静默无效果。
 - **修法**：新增 `_cd_expr()`（`ssh_mcp.py`），`~` / `~user` 与第一个 `/` 之前的头留在引号外、其余照旧引号保护，前缀与探活两处都换用它；`_cd_only_segment` 接受单 token 的 `cd`，按回 home 处理。
-- **真机复验（100）**：`cd ~` → `cwd_after=/home/qy`；`cd ~/no-such-xyz` 报错里是展开后的 `/home/qy/no-such-xyz`；带空格目录 `cd '/tmp/sshmcp cd dir'` 记住，下一条 `pwd` 命中。离线 +2 例：`test_cd_expr_keeps_tilde_out_of_the_quotes`、`test_cd_probe_forms`。
+- **真机复验（100）**：`cd ~` → `cwd_after=/home/user`；`cd ~/no-such-xyz` 报错里是展开后的 `/home/user/no-such-xyz`；带空格目录 `cd '/tmp/sshmcp cd dir'` 记住，下一条 `pwd` 命中。离线 +2 例：`test_cd_expr_keeps_tilde_out_of_the_quotes`、`test_cd_probe_forms`。
 - **语义备忘**：只有「单发一条 cd」或 `cwd` 参数改服务端记忆；`cd X && cmd` 复合形态只影响本条（与真 shell 的持久目录不同）。
 
 ## 2026-09-29 · 权限控制解除，只留 killlist（决策记录）
@@ -21,15 +21,15 @@
 - **查清单的主机**：`username == "root"` 恒查，非 root 由 `policy.json` 的 `guarded_hosts` 点名（当前点名：`66`）。
 - **提权（同日追加）**：`exec(..., elevate=true)` 把单条命令包成 `sudo -S -p '' --user <elevate_user> -- sh -c '<含 cd 前缀的整段>'`，口令写进 channel stdin。能力位在凭据文件（`elevate` / `elevate_user` / `elevate_password`，后两者可省，口令默认复用登录口令）。**提权命令一律查 killlist**，不看 `guarded_hosts`。
 - **理由（用户判定）**：命令过滤挡不住蓄意绕行的 AI，却给每条正常命令加一轮往返。保留的清单定位是**挡手滑**。
-- **随变更消失的旧条目**：裸 `mount` 被错杀（P2）、`policy.json` 与凭据双写造成的 `new8`/`admin` 缺条目摩擦、grant 对非 root 主机空转。
+- **随变更消失的旧条目**：裸 `mount` 被错杀（P2）、`policy.json` 与凭据双写造成的主机缺条目摩擦、grant 对非 root 主机空转。
 - **仍未修的**：见下面两条 P1。
 
 ## 2026-09-29 · `username == "root"` 这条判定分支没有真机证据（P2，从 P1 降级）
 
-- **症状**：killlist 的生效条件之一是 `cred.privileged`（`username == "root"`），而配置里唯一的 root 主机 `admin`（pve2）在凭据文件中缺条目，`new8`（10.81.2.48/dell）同样缺。
-- **已排除**：不是整条链路没验。**「命中 → 拒且不建立连接 → `force=true` 送到远端 → 审计记 `rule:"forced"`」在 100 上真机跑通了** —— 办法是把 100 临时加进 `guarded_hosts`（它是非 root 的 `qy`，走的是同一个 `G.applies` 谓词的另一半）。硬证据：`userdel mcp-selftest-absent` 不带 force 返回 `{blocked:true, rule:"deny:userdel"}` 且 `POOL.connected("100")` 为假；带 force 后远端真执行、返回 `exit_code=6`（用户不存在）。验完已把 100 从 `guarded_hosts` 里撤掉，撤掉后同一条命令不再被拦（exit 6）。
+- **症状**：killlist 的生效条件之一是 `cred.privileged`（`username == "root"`），而配置里唯一的 root 主机在凭据文件中缺条目；另一台非 root 主机同样缺。
+- **已排除**：不是整条链路没验。**「命中 → 拒且不建立连接 → `force=true` 送到远端 → 审计记 `rule:"forced"`」在 100 上真机跑通了** —— 办法是把 100 临时加进 `guarded_hosts`（它是非 root 的普通账号，走的是同一个 `G.applies` 谓词的另一半）。硬证据：`userdel mcp-selftest-absent` 不带 force 返回 `{blocked:true, rule:"deny:userdel"}` 且 `POOL.connected("100")` 为假；带 force 后远端真执行、返回 `exit_code=6`（用户不存在）。验完已把 100 从 `guarded_hosts` 里撤掉，撤掉后同一条命令不再被拦（exit 6）。
 - **残留风险**：只差 `privileged` 那半行的真机确认。离线侧 `KilllistWiring` 有 5 例 + `test_ssh_guard.py::GuardScope` 4 例钉着两种触发条件与 `list_hosts` 的归属显示。
-- **最小复现**：补上 root 凭据后 `exec(host="admin", command="mkfs.ext4 /dev/sda1")` 应 `{blocked:true, reason:"killlisted"}`，带 `force=true` 应执行且审计记 `rule:"forced"`。
+- **最小复现**：补上 root 凭据后 `exec(host="root-host", command="mkfs.ext4 /dev/sda1")` 应 `{blocked:true, reason:"killlisted"}`，带 `force=true` 应执行且审计记 `rule:"forced"`。
 - **要补的是凭据，不是代码。**
 
 ## 2026-09-29 · `pin_hostkey` 的两步确认靠约定，不靠强制（P1）
