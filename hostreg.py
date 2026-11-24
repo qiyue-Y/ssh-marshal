@@ -15,23 +15,28 @@
   - `_` 开头的注释键原样保留；条目里服务端不认识的键也原样保留（GUI 只改它认识的字段）。
   - password 留空 = 沿用旧口令（GUI 不回填明文，避免出现在截图里）。
 
-本模块注意：**服务进程（ssh_mcp.py）只读凭据文件**，写只在用户自己的工具里发生。
+本模块注意：**服务进程（ssh_marshal.py）只读凭据文件**，写只在用户自己的工具里发生。
 """
 
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_NAME = "ssh_mcp_hosts.json"
+DEFAULT_NAME = "ssh_marshal_hosts.json"
 BACKUP_KEEP = 10
 SKIP_HOSTS = {"github.com"}  # 没有 shell 可 exec 的目标
 
@@ -62,9 +67,9 @@ class HostregError(ValueError):
 
 
 def hosts_path() -> Path:
-    if raw := os.environ.get("SSHMCP_HOSTS"):
+    if raw := os.environ.get("SSHMARSHAL_HOSTS"):
         return Path(raw).expanduser()
-    base = Path(os.environ["SSHMCP_HOME"]).expanduser() if os.environ.get("SSHMCP_HOME") else HERE
+    base = Path(os.environ["SSHMARSHAL_HOME"]).expanduser() if os.environ.get("SSHMARSHAL_HOME") else HERE
     return base / DEFAULT_NAME
 
 
@@ -388,3 +393,96 @@ def build_candidates(raw: dict, connected: dict[tuple[str, int], dict[str, str]]
         cand.notes.append("password 需要手填")
         out.append(cand)
     return out
+
+
+# --------------------------------------------------------------------------------------
+# 配置窗口的拉起与判活（给 ssh_marshal.py 的 hosts_gui 工具用）
+#
+# 拉起是 detached 的：窗口的父进程是 MCP 服务，但服务重启不会把它带走。
+# 判活用命名互斥体而不是 pid 文件：进程一退出内核就释放，不会留下假活的陈旧 pid。
+# --------------------------------------------------------------------------------------
+
+
+def gui_script() -> Path:
+    return HERE / "hosts_gui.py"
+
+
+def _gui_mutex_name(path: Path) -> str:
+    key = hashlib.sha1(str(path.expanduser().resolve()).lower().encode("utf-8")).hexdigest()[:12]
+    return f"Local\\sshmarshal-hosts-gui-{key}"
+
+
+def hold_gui_mutex(path: Path | None = None):
+    """窗口进程活着期间占住互斥体；返回值要一直握到窗口关闭。非 Windows 返回 None。"""
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    return kernel32.CreateMutexW(None, False, _gui_mutex_name(path or hosts_path()))
+
+
+def gui_running(path: Path | None = None) -> bool:
+    """这个凭据文件对应的配置窗口是否还活着。非 Windows 一律当作没开。"""
+    if os.name != "nt":
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenMutexW(0x00100000, False, _gui_mutex_name(path or hosts_path()))  # SYNCHRONIZE
+    if not handle:
+        return False
+    kernel32.CloseHandle(handle)
+    return True
+
+
+def launch_gui(path: Path | None = None) -> dict:
+    """detached 拉起 hosts_gui.py，并等它把窗口建起来（最多 5 秒）再回报是否活着。"""
+    target = Path(path or hosts_path()).expanduser()
+    if gui_running(target):
+        return {"ok": True, "running": True, "pid": None, "reused": True}
+    script = gui_script()
+    if not script.exists():
+        return {"ok": False, "reason": "script_missing", "hint": f"找不到 {script}"}
+    if importlib.util.find_spec("tkinter") is None:
+        return {"ok": False, "reason": "tkinter_unavailable",
+                "hint": "当前 Python 没有 tkinter，请用 uv run hosts_gui.py 手动打开"}
+    env = dict(os.environ)
+    env["SSHMARSHAL_HOSTS"] = str(target)  # 窗口必须编辑服务正在读的那份清单
+    args = [sys.executable, str(script)]
+    kwargs = dict(cwd=str(HERE), env=env, stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    if os.name == "nt":
+        base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            # 连同 Job 一起脱出，否则客户端重启/命令结束时窗口会被回收
+            proc = subprocess.Popen(args, creationflags=base | 0x01000000, **kwargs)  # CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            proc = subprocess.Popen(args, creationflags=base, **kwargs)
+    else:
+        proc = subprocess.Popen(args, **kwargs)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if gui_running(target):
+            return {"ok": True, "pid": proc.pid, "running": True}
+        if proc.poll() is not None:  # 起不来（缺 tkinter、脚本报错）时别谎报已打开
+            return {"ok": False, "reason": "exited", "pid": proc.pid,
+                    "exit_code": proc.returncode, "hint": "窗口进程立刻退出了，请用 uv run hosts_gui.py 看报错"}
+        time.sleep(0.1)
+    return {"ok": True, "pid": proc.pid, "running": gui_running(target)}
+
+
+def file_digest(path: Path) -> dict:
+    """内容哈希，用来判断「用户改过没有」；不看 mtime，备份与临时写不会误报。"""
+    try:
+        data = path.read_bytes()
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return {"exists": False, "sha256": None, "mtime": None, "size": 0}
+    return {
+        "exists": True,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "mtime": datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds"),
+        "size": len(data),
+    }

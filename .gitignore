@@ -1,7 +1,7 @@
 # 凭据与运行时产物，一律不入库
-ssh_mcp_hosts.json
-ssh_mcp_hosts.json.bak-*
-ssh_mcp_hosts.candidates.json
+ssh_marshal_hosts.json
+ssh_marshal_hosts.json.bak-*
+ssh_marshal_hosts.candidates.json
 hostkeys.json
 audit/
 output/

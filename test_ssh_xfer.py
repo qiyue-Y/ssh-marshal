@@ -146,7 +146,7 @@ class PushPull(unittest.TestCase):
 
     def test_pull_resumes_symmetrically(self):
         self.sftp.files["/r/big.bin"] = bytearray(self.data)
-        part = str(self.tmp / "dst.sshmcp-part")
+        part = str(self.tmp / "dst.sshmarshal-part")
         Path(part).write_bytes(self.data[: 6 * CH])
         tr = X.pull(self.sftp, "/r/big.bin", part, chunk=CH)
         self.assertEqual(tr.resumed_from, 6 * CH)
@@ -236,7 +236,7 @@ class PushPull(unittest.TestCase):
 
     def test_stale_local_part_larger_than_remote_is_discarded(self):
         self.sftp.files["/r/small.bin"] = bytearray(b"tiny" * 10)
-        part = self.tmp / "dst.sshmcp-part"
+        part = self.tmp / "dst.sshmarshal-part"
         part.write_bytes(b"\xff" * (9 * CH))
         tr = X.pull(self.sftp, "/r/small.bin", str(part), chunk=CH)
         self.assertEqual(tr.resumed_from, 0)
@@ -297,7 +297,7 @@ class UnknownSizePull(unittest.TestCase):
         content = b"processor : 0\nmodel name : x\n" * 40
         self.sftp.files["/r/proc"] = bytearray(content)
         self._force_stat("/r/proc", 0)
-        part = self.tmp / "dst.sshmcp-part"
+        part = self.tmp / "dst.sshmarshal-part"
         tr = X.pull(self.sftp, "/r/proc", str(part), chunk=CH)
         self.assertEqual(part.read_bytes(), content, "0 字节的伪文件要按 EOF 读全，不是落 0 字节")
         self.assertEqual(tr.bytes, len(content))
@@ -306,7 +306,7 @@ class UnknownSizePull(unittest.TestCase):
     def test_zero_size_discards_stale_part(self):
         self.sftp.files["/r/proc"] = bytearray(b"new content")
         self._force_stat("/r/proc", 0)
-        part = self.tmp / "dst.sshmcp-part"
+        part = self.tmp / "dst.sshmarshal-part"
         part.write_bytes(b"\xff" * (3 * CH))
         tr = X.pull(self.sftp, "/r/proc", str(part), chunk=CH)
         self.assertEqual(tr.resumed_from, 0, "长度未知就不续传")

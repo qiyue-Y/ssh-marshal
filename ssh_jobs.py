@@ -22,7 +22,7 @@ import shlex
 import time
 
 # 远端 $HOME 下的目录名：只在这里定义一处，脚本和 SFTP 路径都从这里取
-JOBS_DIRNAME = ".sshmcp-jobs"
+JOBS_DIRNAME = ".sshmarshal-jobs"
 JOB_ID_RE = re.compile(r"job-[a-z0-9]{6,14}-[0-9a-f]{4}")
 
 # 四态判定，顺序固定：exit > killed > 存活且确实是我们的进程 > lost。

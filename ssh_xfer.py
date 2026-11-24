@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 # 1MB：实测与 sftp.put 同速的最优分片，同时给续传足够细的粒度
 DEFAULT_CHUNK = 1024 * 1024
-PART_SUFFIX = ".sshmcp-part"
+PART_SUFFIX = ".sshmarshal-part"
 # 单条 SFTP 请求上限：paramiko 默认 32KB 的实例级覆盖，理由见文件头实测段
 REQUEST_SIZE = 128 * 1024
 

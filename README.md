@@ -1,4 +1,4 @@
-# ssh-mcp
+# ssh-marshal
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -15,28 +15,28 @@
 
 | 能力 | 说明 |
 |---|---|
-| 12 个工具 | `exec` / `put_file` / `get_file` / `xfer_stat` / `job_*` / `session_reset` / `pin_hostkey` / `list_hosts` / `audit_tail` / `read_output` |
+| 13 个工具 | `exec` / `put_file` / `get_file` / `xfer_stat` / `job_*` / `session_reset` / `pin_hostkey` / `list_hosts` / `hosts_gui` / `audit_tail` / `read_output` |
 | 连接与目录 | per-host 连接池 + keepalive；cwd 服务端记忆；`login_shell` / `shell_init` |
 | 提权 | `sudo -S`，口令走 channel stdin（不进 argv、审计、远端 history） |
 | 长任务 | `detach=true` + 远端 job 状态机，服务重启/断连后可续查 |
 | 文件传输 | 分片续传 + 两端 md5；`recursive=true` 传整棵目录，软链跳过 |
 | 输出与审计 | 全文落 `output/`，按行号回捞；`call`/`result` + `call_id`；`only_risky` 只看异常 |
 | 安全与回滚 | 72 条不可逆动作清单；敏感文件写前自动备份；`force_reason` 留痕 |
-| 图形配置 | `hosts_gui.py`：增改删、停用、探测指纹、测试连接、从 known_hosts 导入 |
+| 图形配置 | `hosts_gui.py`：增改删、停用、探测指纹、测试连接、从 known_hosts 导入；Agent 用 `hosts_gui` 工具拉起并复用同一个窗口 |
 
 ## 快速开始
 
 ```powershell
-uv run --quiet ssh_mcp.py doctor   # 1. 自检配置、凭据、依赖与目录
-uv run hosts_gui.py                # 2. 图形界面配置主机（或手工填 ssh_mcp_hosts.example.json）
+uv run --quiet ssh_marshal.py doctor   # 1. 自检配置、凭据、依赖与目录
+uv run hosts_gui.py                # 2. 图形界面配置主机（或手工填 ssh_marshal_hosts.example.json）
 ```
 
 ```jsonc
 // 3. 接入 MCP 客户端
-"ssh-mcp": {
+"ssh-marshal": {
   "command": "uv",
-  "args": ["run", "--quiet", "<仓库路径>/ssh_mcp.py"],
-  "env": { "SSHMCP_HOME": "<仓库路径>" }
+  "args": ["run", "--quiet", "<仓库路径>/ssh_marshal.py"],
+  "env": { "SSHMARSHAL_HOME": "<仓库路径>" }
 }
 ```
 
@@ -45,7 +45,7 @@ uv run hosts_gui.py                # 2. 图形界面配置主机（或手工填 
 | 文件 | 内容 |
 |---|---|
 | `README.md` | 用法、工具、传输、审计与边界（本文件） |
-| `AGENTS.md` | 给 Agent 的固定流程：开 GUI → 等关闭 → 验证配置 |
+| `AGENTS.md` | 给 Agent 的固定流程：开 GUI → 等用户确认 → 验证配置 |
 | `DESIGN.md` | 下一阶段的设计取舍（安全模型、并发、环境初始化） |
 | `ISSUES.md` | 已知缺陷与实测边界 |
 | `SUGGESTION.md` | 可改可不改的优化建议 |
@@ -71,7 +71,7 @@ uv run hosts_gui.py                # 2. 图形界面配置主机（或手工填 
 
 ```powershell
 # 自检（配置、凭据、指纹、依赖、审计与日志目录可写）
-uv run --quiet ssh_mcp.py doctor
+uv run --quiet ssh_marshal.py doctor
 ```
 
 清单判定的离线用例（裸 python 即可，不需要 paramiko；含等价写法与「设计上不再防」的形态）：
@@ -112,7 +112,7 @@ uv run --quiet smoke_stdio.py
 
 ## 配
 
-1. `copy ssh_mcp_hosts.example.json ssh_mcp_hosts.json`，填真实凭据；或者直接用界面维护：`uv run hosts_gui.py`。**凭据文件对服务端只读**：AI 与运行中的服务都不会写它，写只发生在你运行 GUI / `gen_hosts.py --merge` 时。
+1. `copy ssh_marshal_hosts.example.json ssh_marshal_hosts.json`，填真实凭据；或者直接用界面维护：`uv run hosts_gui.py`。**凭据文件对服务端只读**：AI 与运行中的服务都不会写它，写只发生在你运行 GUI / `gen_hosts.py --merge` 时。
    可用字段：`address` `port` `username` `auth`（`password`/`key`）`password` `key_path` `hostKey` `purpose`，提权三项 `elevate` `elevate_user` `elevate_password`（见「提权」节），环境初始化字段 `shell_init`（见「环境初始化」节），以及能力位 `disabled` `critical` `xfer`（见下一条）。
    旧字段 `rw_allowed` 已从模型里删掉；凭据文件里残留它会被静默忽略，不用你去清理（有用例钉着这个兼容行为）。
    `auth: "key"` 时 `key_path` 可省略，缺省按 `~/.ssh/{id_ed25519,id_rsa,id_ecdsa,id_dsa}` 顺序找。**带 passphrase 的文件私钥不支持**，此时改为问 ssh-agent 并取它的第一把 key（只取一把：逐把试认证会连着打远端的失败次数）。Windows 的 `ssh-agent` 服务默认是 Stopped/Disabled，要先 `Set-Service ssh-agent -StartupType Manual` 起服务再 `ssh-add`。
@@ -128,10 +128,10 @@ uv run --quiet smoke_stdio.py
 3. 在 MCP 客户端里加一条服务（以通用 `mcpServers` 写法为例，具体文件位置看你的客户端）：
 
 ```json
-"ssh-mcp": {
+"ssh-marshal": {
   "command": "uv",
-  "args": ["run", "--quiet", "<仓库绝对路径>/ssh_mcp.py"],
-  "env": { "SSHMCP_HOME": "<仓库绝对路径>" }
+  "args": ["run", "--quiet", "<仓库绝对路径>/ssh_marshal.py"],
+  "env": { "SSHMARSHAL_HOME": "<仓库绝对路径>" }
 }
 ```
 
@@ -230,6 +230,7 @@ sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 ## 工具
 
 - `list_hosts(brief?)` —— 主机、`pin_source`、是否查清单、限额。`brief=true` 只回短字段（不带每台的 limits 与全量 killlist），省上下文。不含密码。
+- `hosts_gui(action?)` —— 拉起/复用主机清单图形界面。`action=open`（缺省）：窗口已开就复用，否则 detached 拉起并等窗口建好，返回 `running`、`launched`、`pid`、`file.sha256` 与现有 `hosts`；`action=status` 只查窗口是否还开着、凭据文件是否变过。工具调用不阻塞等窗口关闭：用户说配好后再用 `status` 比对 `file.sha256`，再用 `list_hosts` 确认改动。
 - `exec(host, command, cwd?, idle_timeout?, max_duration?, force?, elevate?, detach?, force_reason?, login_shell?)` —— 离散命令。`cwd` 由服务端按主机记忆：单发一条 `cd <目录>`（或光一个 `cd` 回 home）验活成功后写入，后续命令自动从该目录开始；`cd X && cmd` 复合形态只影响本条。被拦下时不建立连接。`elevate=true` 以 root 跑这一条（凭据里得先给这台开 `elevate`）。`detach=true` 丢后台跑并立刻返回 `job_id`（见「后台任务」一节）。`force_reason` 是 `force=true` 时写进审计的一句原因。`login_shell=true` 用 `bash -lc` 跑这一条（见「环境初始化」）。
 - `pin_hostkey(host, trust?)` —— 探测主机指纹；`trust=true` 才写 `hostkeys.json`。
 - `put_file(host, local, remote, overwrite?, force?, elevate?, restart?, mode?, force_reason?, recursive?)` —— 本机 → 远端，分片续传 + md5。`recursive=true` 传整棵目录（见「目录传输」）。
@@ -248,11 +249,11 @@ sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 
 ## 敏感文件写前备份
 
-改 `authorized_keys`、`sshd_config`、`sudoers`、`fstab`、`shadow`、`passwd` 这类文件前，服务端先把现有内容备份到远端 `~/.sshmcp-backups/<时间戳>-<短id>/`，文件名带序号前缀（`00-authorized_keys`）。
+改 `authorized_keys`、`sshd_config`、`sudoers`、`fstab`、`shadow`、`passwd` 这类文件前，服务端先把现有内容备份到远端 `~/.sshmarshal-backups/<时间戳>-<短id>/`，文件名带序号前缀（`00-authorized_keys`）。
 
 - 覆盖对象是**这条命令会写到的文件**：写重定向、`tee`、`rm`/`cp`/`mv`/`install`/`ln`/`sed`/`truncate` 的操作数；`put_file` 覆盖已存在的敏感目标也走同一条路。
 - **备份失败就不执行**：返回 `{blocked:true, reason:"backup_failed"}`，原文件保持不动。目标文件本来不存在不算失败（没有旧内容可备）。
-- 返回值带 `backup` 路径，审计记 `event:"backup"`（成功）或 `backup_failed`（失败），可用来恢复：`cp -a ~/.sshmcp-backups/<目录>/00-authorized_keys /root/.ssh/authorized_keys`。
+- 返回值带 `backup` 路径，审计记 `event:"backup"`（成功）或 `backup_failed`（失败），可用来恢复：`cp -a ~/.sshmarshal-backups/<目录>/00-authorized_keys /root/.ssh/authorized_keys`。
 - 备份目录不会自动清理（它不是调试垃圾，而是回滚依据）；空间不够时自己删旧目录。
 
 ## 环境初始化（login_shell / shell_init）
@@ -265,7 +266,7 @@ sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 | 固定初始化片段 | 凭据里写 `"shell_init": "~/miniconda3/etc/profile.d/conda.sh"` | conda / venv / 自定义 PATH，每条 exec 都先 source 它 |
 
 - `shell_init` 只在**用户命令**前生效；备份、md5、job 脚本这类内部命令不 source，避免初始化输出污染判断。
-- 初始化片段失败时命令不执行，返回 `exit_code: 97` 且 stderr 有 `[sshmcp] shell_init 失败`，不会和用户命令的退出码混在一起。
+- 初始化片段失败时命令不执行，返回 `exit_code: 97` 且 stderr 有 `[sshmarshal] shell_init 失败`，不会和用户命令的退出码混在一起。
 - 顺序是 `cd <cwd>` → `source <shell_init>` → 你的命令；`login_shell` 再整体套 `bash -lc`。
 - 两者都不改变"每条命令独立"的语义：没有隐藏状态，审计可以原样重放。
 
@@ -307,7 +308,7 @@ sudo -S -p '' --user root -- sh -c '<原命令，含 cd 前缀>'
 
 每片 flush 不是代价，是**正确性要求**：pipelined 写是异步入队的，中途抛异常或提前关通道时，已入队的写还会继续落服务端。真机抓到过这一幕 —— 超时中断时 part 是 12MB，下次再看成了 60MB，续传点建立在漂移的状态上。逐片 flush 之后 part 的字节数才是确定的。
 
-续传语义按**片**而不是按字节：part 路径由目标固定（`<目标>.sshmcp-part`，不带随机后缀，这是「下次能接着传」的前提）；恢复时把末尾不足一片的部分截掉，从该片整片重写；片内不连续由最终的整文件 md5 兜底。想丢掉 part 从头传带 `restart=true`。
+续传语义按**片**而不是按字节：part 路径由目标固定（`<目标>.sshmarshal-part`，不带随机后缀，这是「下次能接着传」的前提）；恢复时把末尾不足一片的部分截掉，从该片整片重写；片内不连续由最终的整文件 md5 兜底。想丢掉 part 从头传带 `restart=true`。
 
 真机验证（100，60MB 随机数据）：3 秒超时掐断 → part 留 16 片 → 续传 `resumed_from=16777216`、实传 44MB、`md5_local == md5_remote == 原文`、part 消失。下载方向同样（`resumed_from=22020096`，续传 16.9 MB/s）。
 
@@ -359,10 +360,10 @@ SFTP  open(同一路径, "a")                        ->  成功
 
 SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`，sudo 又给不了 SFTP，所以 `elevate=true` 走两段式：
 
-- 上传：SFTP 到 `~/.sshmcp-xfer/<名>.part` → `exec(elevate)` 跑 `install -m <mode> <part> <目标> && rm part`
-- 下载：`exec(elevate)` 把源 `cat` 到 `~/.sshmcp-xfer/<名>.in.part` → SFTP 取回 → 删暂存
+- 上传：SFTP 到 `~/.sshmarshal-xfer/<名>.part` → `exec(elevate)` 跑 `install -m <mode> <part> <目标> && rm part`
+- 下载：`exec(elevate)` 把源 `cat` 到 `~/.sshmarshal-xfer/<名>.in.part` → SFTP 取回 → 删暂存
 
-暂存**不放 `/tmp`**：100 的 `/tmp` 是 tmpfs（15.2G，机器 30G 内存），按 4GB 上限算，一个临时文件就吃掉 4GB 内存。`~/.sshmcp-xfer` 落在 ext4（实测可用 849G）。
+暂存**不放 `/tmp`**：100 的 `/tmp` 是 tmpfs（15.2G，机器 30G 内存），按 4GB 上限算，一个临时文件就吃掉 4GB 内存。`~/.sshmarshal-xfer` 落在 ext4（实测可用 849G）。
 
 覆盖保护独立于清单：同名文件已存在时默认拒（`remote_exists` / `local_exists`），要覆盖显式 `overwrite=true`。注意普通 `sftp.rename` 在目标已存在时回 `Failure`（100 实测），所以覆盖走 `posix_rename`。
 
@@ -370,7 +371,7 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 
 `get_file` 的默认位置按三级解析，改哪级都是热加载：
 
-1. 环境变量 `SSHMCP_XFER`
+1. 环境变量 `SSHMARSHAL_XFER`
 2. `policy.json` 的 `defaults.xfer_dir`
 3. 都没有 → 系统真实下载目录（Windows 读注册表 `User Shell Folders` 的 `{374DE290-123F-4565-9164-39C4925E467B}`，因为下载目录可能被重定向到别的盘）
 
@@ -393,7 +394,7 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 
 `exec(..., detach=true)` 把命令丢到远端后台跑，立刻返回 `job_id`；配 `job_status` / `job_kill` / `job_list` 使用。**这是绕开「客户端 60 秒调用硬上限」的唯一出路**——实测任何单次 MCP 调用超过约 60 秒必报 `MCP tool invocation did not complete`（8 次报错与审计 intent 的时间差实测 60.4–60.9s），`max_duration` 传多大都没用。
 
-- 状态存**远端** `~/.sshmcp-jobs/<job_id>/`：`cmd` 命令原文、`dir` 工作目录、`out`（stdout+stderr 合并）、`pid`、`started`、`exit`、`killed`。MCP 服务重启、SSH 断连、Agent 换会话都能接着轮询（要点：状态不存服务进程内存）。
+- 状态存**远端** `~/.sshmarshal-jobs/<job_id>/`：`cmd` 命令原文、`dir` 工作目录、`out`（stdout+stderr 合并）、`pid`、`started`、`exit`、`killed`。MCP 服务重启、SSH 断连、Agent 换会话都能接着轮询（要点：状态不存服务进程内存）。
 - 判活必须过 `job_is_ours`：`/proc/<pid>/cmdline`（无 procfs 退 `ps -o args=`）里有这个 job id 才算 running —— `kill -0` 只证明「有进程占着这个 pid」，防 PID 复用误判/误杀。
 - `job_kill` 先对进程组 SIGTERM，5 秒不退再 SIGKILL，另有子进程树兜底（setsid 不可用的主机）；杀前同样过 `job_is_ours`。
 - `job_status` 给 `offset` 就只回新增部分（返回 `offset_next` 供下次接着取），不给就回最后 `max_bytes` 字节。输出只在远端 `out` 文件，不占本机 `output/` 配额。
@@ -408,7 +409,7 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 每个 MCP 工具调用写两条元数据：入口 `call`（工具名、参数、host、`call_id`），出口 `result` 或 `error`（ok、`duration_ms`、结果摘要；异常带类型、消息与调用栈）。工具内部原有的 `intent` / `executed` / `blocked` / `transferred` / `job_started` 等记录会自动带上同一个 `call_id`，一次调用前后的线索可以直接串起来。
 
 - **审计只放元数据和引用**：命令原文、退出码、`output_id`、传输字节数与 md5 进审计；stdout/stderr/文件内容不复制进审计，它们留在 `output/` 与传输目标里，按引用回查。
-- 审计文件按天轮转：`audit/ssh-mcp.jsonl` → `audit/ssh-mcp.YYYYMMDD.jsonl`，保留 **14 天**（`SSHMCP_AUDIT_KEEP_DAYS`），路径可用 `SSHMCP_AUDIT` 覆盖。
+- 审计文件按天轮转：`audit/ssh-marshal.jsonl` → `audit/ssh-marshal.YYYYMMDD.jsonl`，保留 **14 天**（`SSHMARSHAL_AUDIT_KEEP_DAYS`），路径可用 `SSHMARSHAL_AUDIT` 覆盖。
 - `audit_tail(host?, limit?, only_risky?)` 会按时间倒序读当前文件与轮转文件；排障时先按 host/时间找到 `call_id`，再看这次调用的 `call`、工具内部记录与最终 `result`/`error`。正常命令太多时用 `only_risky=true`，只看被拦、强制越过、失败、异常和敏感写备份。
 - `read_output` 本身没有 host 参数：服务端用内存里的 `output_id → host` 表补 host；服务重启后表为空时会回扫审计文件里同 `output_id` 的 `executed` 记录，所以按主机过滤也能看到回捞动作。
 - 审计写入失败时：`exec` 的 `intent` 仍是 fail closed（写不进就不执行）；包装层的 `call`/`result` 是尽力而为，只往 stderr 报错，不影响只读工具。
@@ -419,7 +420,7 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 
 - 单文件上限取 `policy.defaults.max_output_bytes`（现 8MB），超出即停止写入并在 `output.<stream>.overflow` 里标记
 - 轮转预算：`14 天` 且 `≤200 个 run` 且 `≤500MB`，任一命中就删整组；每次 `exec` 前顺手清一次（无定时器、无后台线程）
-- 以上预算可用环境变量覆盖：`SSHMCP_OUTPUT`（目录）、`SSHMCP_OUTPUT_KEEP_RUNS`、`SSHMCP_OUTPUT_KEEP_BYTES`、`SSHMCP_OUTPUT_KEEP_DAYS`
+- 以上预算可用环境变量覆盖：`SSHMARSHAL_OUTPUT`（目录）、`SSHMARSHAL_OUTPUT_KEEP_RUNS`、`SSHMARSHAL_OUTPUT_KEEP_BYTES`、`SSHMARSHAL_OUTPUT_KEEP_DAYS`
 - **全文是原文落盘，不做脱敏。** 构建日志里可能出现 `--password=`、`Authorization:`、带 token 的镜像源 URL。`output/` 已进 `.gitignore`，但如果你在本机跑了文件同步/分享工具，别让它覆盖这个目录 —— 这是这套设计换来的代价，换掉的收益是「Agent 能拿到结论而不用吞 80KB 日志」。
 - 日志目录与审计目录写不了就**拒绝执行**（fail closed），不会静默降级成「只有内存里那份」。
 
@@ -442,8 +443,8 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 ## CLI（人在终端敲）
 
 ```powershell
-uv run --quiet ssh_mcp.py doctor    # 配置/凭据/指纹/依赖/两个目录可写
-uv run --quiet ssh_mcp.py list      # 主机、guard 是否生效、pin 来源、当前 cwd
+uv run --quiet ssh_marshal.py doctor    # 配置/凭据/指纹/依赖/两个目录可写
+uv run --quiet ssh_marshal.py list      # 主机、guard 是否生效、pin 来源、当前 cwd
 ```
 
 `grant`/`revoke` 与 Windows 原生确认框随权限控制一起删掉了。（留着也没意义：实测 Agent 的 Bash 里 `stdin.isatty()` 返回 True，Git Bash 经 conpty 伪装成终端，那道校验本来就拦不住自批。）

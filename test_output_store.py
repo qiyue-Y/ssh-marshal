@@ -16,7 +16,7 @@ from pathlib import Path
 
 import output_store as OS
 
-ROOT = Path(tempfile.mkdtemp(prefix="ssh-mcp-output-test-"))
+ROOT = Path(tempfile.mkdtemp(prefix="ssh-marshal-output-test-"))
 RUN = "0f1e2d3c4b5a6978"  # 32 位以外的合法十六进制串也行，fullmatch 只看形态
 
 

@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["paramiko>=3.4"]
 # ///
-"""hosts_gui.py —— ssh-mcp 主机清单的可视化编辑窗口（用户本人运行）。
+"""hosts_gui.py —— ssh-marshal 主机清单的可视化编辑窗口（用户本人运行）。
 
     uv run hosts_gui.py            # 打开窗口
     uv run hosts_gui.py --selftest # 只验证窗口能构造：建好后自动关（给自动化用）
@@ -50,7 +50,7 @@ class App:
         self.reg = registry
         self.current: str | None = None  # 正在编辑的条目；None 表示新建
 
-        root.title(f"ssh-mcp 主机清单 — {self.reg.path}")
+        root.title(f"ssh-marshal 主机清单 — {self.reg.path}")
         root.geometry("1180x720")
         root.minsize(960, 600)
 
@@ -459,15 +459,17 @@ def main(argv: list[str]) -> int:
         tmp.write_text(json.dumps({"100": {"address": "10.0.0.1", "username": "u", "auth": "password",
                                            "password": "x", "hostKey": "SHA256:AAA"}}, ensure_ascii=False),
                        encoding="utf-8")
-        os.environ["SSHMCP_HOSTS"] = str(tmp)
+        os.environ["SSHMARSHAL_HOSTS"] = str(tmp)
 
     root = tk.Tk()
     app = App(root, R.Registry())
+    mutex = R.hold_gui_mutex()  # 握到窗口关闭：hosts_gui 工具靠这个互斥体判断窗口是否已经开着
     if selftest:
         root.after(500, root.destroy)
     else:
         app.set_status(f"清单文件：{app.reg.path}（保存前会自动备份）")
     root.mainloop()
+    del mutex
     return 0
 
 

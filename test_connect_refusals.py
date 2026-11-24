@@ -27,8 +27,8 @@ HERE = Path(__file__).resolve().parent
 
 _REPO_GUARD = json.loads((HERE / "policy.json").read_text(encoding="utf-8"))
 
-# 必须在 import ssh_mcp 之前设好，模块在导入期读环境变量
-_TMP = Path(tempfile.mkdtemp(prefix="ssh-mcp-selftest-"))
+# 必须在 import ssh_marshal 之前设好，模块在导入期读环境变量
+_TMP = Path(tempfile.mkdtemp(prefix="ssh-marshal-selftest-"))
 _HOSTS = _TMP / "hosts.json"
 _AUDIT = _TMP / "audit.jsonl"
 _POLICY = _TMP / "policy.json"
@@ -45,17 +45,17 @@ _POLICY.write_text(
     ),
     encoding="utf-8",
 )
-os.environ["SSHMCP_HOSTS"] = str(_HOSTS)
-os.environ["SSHMCP_AUDIT"] = str(_AUDIT)
-os.environ["SSHMCP_HOSTKEYS"] = str(_TMP / "hostkeys.json")
-os.environ["SSHMCP_OUTPUT"] = str(_TMP / "output")
-os.environ["SSHMCP_POLICY"] = str(_POLICY)
+os.environ["SSHMARSHAL_HOSTS"] = str(_HOSTS)
+os.environ["SSHMARSHAL_AUDIT"] = str(_AUDIT)
+os.environ["SSHMARSHAL_HOSTKEYS"] = str(_TMP / "hostkeys.json")
+os.environ["SSHMARSHAL_OUTPUT"] = str(_TMP / "output")
+os.environ["SSHMARSHAL_POLICY"] = str(_POLICY)
 
 import ssh_guard as G  # noqa: E402
-import ssh_mcp as M  # noqa: E402
+import ssh_marshal as M  # noqa: E402
 import output_store as OS  # noqa: E402
 
-REAL_IP = os.environ.get("SSHMCP_TEST_REAL_IP", "192.0.2.100")  # 真机握手用例用；默认文档保留地址，不可达就 skip
+REAL_IP = os.environ.get("SSHMARSHAL_TEST_REAL_IP", "192.0.2.100")  # 真机握手用例用；默认文档保留地址，不可达就 skip
 WRONG_FP = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 
@@ -65,7 +65,7 @@ def write_hosts(entries: dict) -> None:
 
 
 def reset_pins() -> None:
-    p = Path(os.environ["SSHMCP_HOSTKEYS"])
+    p = Path(os.environ["SSHMARSHAL_HOSTKEYS"])
     if p.exists():
         p.unlink()
     M.PINS._mtime = None
@@ -193,7 +193,7 @@ class PinHostkey(unittest.TestCase):
         self.assertTrue(out["probed"])
         self.assertIsNone(out["pinned"])
         self.assertTrue(out["writable"])
-        self.assertFalse(Path(os.environ["SSHMCP_HOSTKEYS"]).exists(), "不带 trust 就绝不能落盘")
+        self.assertFalse(Path(os.environ["SSHMARSHAL_HOSTKEYS"]).exists(), "不带 trust 就绝不能落盘")
 
         with mock.patch.object(M, "probe_hostkey", return_value=("SHA256:livefp", "ssh-ed25519")):
             out = M._tool_pin_hostkey("100", trust=True)
@@ -211,7 +211,7 @@ class PinHostkey(unittest.TestCase):
         self.assertFalse(out["match"])
         self.assertFalse(out["writable"])
         self.assertEqual(out["pin_source"], "credential")
-        self.assertFalse(Path(os.environ["SSHMCP_HOSTKEYS"]).exists())
+        self.assertFalse(Path(os.environ["SSHMARSHAL_HOSTKEYS"]).exists())
         self.assertIn("hostKey", out["hint"])
 
     def test_pin_from_hostkeys_used_when_credential_has_none(self):
@@ -864,10 +864,10 @@ class TransferWiring(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="xfer-wire-"))
         self.src = self.tmp / "a.txt"
         self.src.write_bytes(b"hello" * 4)
-        os.environ["SSHMCP_XFER"] = str(self.tmp / "dl")
+        os.environ["SSHMARSHAL_XFER"] = str(self.tmp / "dl")
 
     def tearDown(self):
-        os.environ.pop("SSHMCP_XFER", None)
+        os.environ.pop("SSHMARSHAL_XFER", None)
 
     def test_sensitive_target_blocked_before_any_sftp(self):
         """点名主机上写 authorized_keys：必须被拦，且一次 SFTP 都不开。"""
@@ -1008,9 +1008,9 @@ class TransferWiring(unittest.TestCase):
 
     def test_xfer_dir_priority_env_then_policy_then_registry(self):
         g = G.GuardConfig(xfer_dir=r"D:\somewhere")
-        with mock.patch.dict(os.environ, {"SSHMCP_XFER": str(self.tmp)}):
+        with mock.patch.dict(os.environ, {"SSHMARSHAL_XFER": str(self.tmp)}):
             self.assertEqual(M.xfer_dir(g), self.tmp)
-        os.environ.pop("SSHMCP_XFER", None)
+        os.environ.pop("SSHMARSHAL_XFER", None)
         self.assertEqual(M.xfer_dir(g), Path(r"D:\somewhere"))
         self.assertEqual(M.xfer_dir(G.GuardConfig()), M._downloads_dir())
 
@@ -1133,7 +1133,7 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(state["max"], 1, "同目标传输必须串行")
 
     def test_concurrent_prune_does_not_raise(self):
-        root = Path(tempfile.mkdtemp(prefix="ssh-mcp-prune-"))
+        root = Path(tempfile.mkdtemp(prefix="ssh-marshal-prune-"))
         for n in range(20):
             (root / f"run{n:02d}.out.log").write_bytes(b"x" * 100)
         errors = []
@@ -1166,7 +1166,7 @@ class BackupWiring(unittest.TestCase):
         def run(cred, pin, command, cwd, idle_s, max_s, spill, elevate=False, login_shell=False, shell_init=False):
             calls.append({"command": command, "cwd": cwd, "elevate": elevate})
             spill.close()
-            if fail_backup and "sshmcp-backups" in command:
+            if fail_backup and "sshmarshal-backups" in command:
                 return M.RunResult(exit_code=1, stdout="", stderr="cp: Permission denied",
                                    truncated=False, timed_out=None, output_id=spill.run_id, stats=spill.stats())
             return M.RunResult(exit_code=0, stdout="", stderr="", truncated=False, timed_out=None,
@@ -1179,7 +1179,7 @@ class BackupWiring(unittest.TestCase):
         with mock.patch.object(M, "run_command", run):
             res = M.execute("100", "echo x > /root/.ssh/authorized_keys")
         self.assertEqual(res["exit_code"], 0)
-        self.assertTrue(res["backup"].startswith("~/.sshmcp-backups/"))
+        self.assertTrue(res["backup"].startswith("~/.sshmarshal-backups/"))
         self.assertEqual(len(calls), 2)
         self.assertIn("mkdir -p", calls[0]["command"])
         self.assertIn("cp -a --", calls[0]["command"])
@@ -1219,7 +1219,7 @@ class BackupWiring(unittest.TestCase):
              mock.patch.object(M, "_remote_md5", return_value=md5):
             r = M._tool_put_file("100", str(src), "/root/.ssh/authorized_keys", overwrite=True)
         self.assertTrue(r.get("verified"), str(r))
-        self.assertTrue(r["backup"].startswith("~/.sshmcp-backups/"))
+        self.assertTrue(r["backup"].startswith("~/.sshmarshal-backups/"))
         self.assertTrue(any("cp -a --" in c["command"] for c in calls), "覆盖前必须先备份旧文件")
         backups = [x for x in M.audit_tail("100", 40) if x.get("event") == "backup"]
         self.assertTrue(backups)
@@ -1246,7 +1246,7 @@ class AuditRisky(unittest.TestCase):
         M.audit({"host": host, "event": "blocked", "reason": "killlisted", "rule": "deny:x"})
         M.audit({"host": host, "event": "executed", "exit_code": 1, "reason": "ok"})
         M.audit({"host": host, "event": "intent", "rule": "forced", "force_reason": "why"})
-        M.audit({"host": host, "event": "backup", "backup": "~/.sshmcp-backups/x"})
+        M.audit({"host": host, "event": "backup", "backup": "~/.sshmarshal-backups/x"})
         M.audit({"host": host, "event": "result", "ok": False, "result": {"error": "x"}})
         data = M._tool_audit_tail(host, 50, only_risky=True)
         events = [(r.get("event"), r.get("exit_code"), r.get("rule")) for r in data["records"]]

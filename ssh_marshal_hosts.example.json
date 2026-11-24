@@ -1,5 +1,5 @@
 {
-  "_说明": "复制成 ssh_mcp_hosts.json 后填真实凭据。本示例文件可以入库，真实凭据文件已被 .gitignore 挡住。2026-09-29 起不再有 rw_allowed 字段：凭据里有这台就连云端，命令一律交给远端 shell，服务端只在 username=root 时查一张自杀清单。",
+  "_说明": "复制成 ssh_marshal_hosts.json 后填真实凭据。本示例文件可以入库，真实凭据文件已被 .gitignore 挡住。2026-09-29 起不再有 rw_allowed 字段：凭据里有这台就连云端，命令一律交给远端 shell，服务端只在 username=root 时查一张自杀清单。",
 
   "example-normal": {
     "address": "10.0.0.10",

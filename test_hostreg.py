@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -200,6 +201,30 @@ class Scan(unittest.TestCase):
         self.assertEqual(len(cands), 1)
         self.assertTrue(any("探测" in n for n in cands[0].notes))
         self.assertTrue(cands[0].importable, "缺指纹只是提醒，可以导入后再探测")
+
+
+class GuiLaunch(unittest.TestCase):
+    def test_file_digest_follows_content(self):
+        path = tmpdir() / "hosts.json"
+        self.assertEqual(R.file_digest(path),
+                         {"exists": False, "sha256": None, "mtime": None, "size": 0})
+        path.write_text('{"a": {}}', encoding="utf-8")
+        first = R.file_digest(path)
+        self.assertTrue(first["exists"])
+        self.assertEqual(first["size"], len('{"a": {}}'))
+        self.assertEqual(first["sha256"], R.file_digest(path)["sha256"], "内容没变哈希必须一样")
+        path.write_text('{"a": {}, "b": {}}', encoding="utf-8")
+        self.assertNotEqual(first["sha256"], R.file_digest(path)["sha256"])
+
+    def test_mutex_name_is_per_credentials_file(self):
+        one = R._gui_mutex_name(Path("a") / "hosts.json")
+        self.assertTrue(one.startswith("Local\\sshmarshal-hosts-gui-"))
+        self.assertEqual(one, R._gui_mutex_name(Path("a") / "hosts.json"))
+        self.assertNotEqual(one, R._gui_mutex_name(Path("b") / "hosts.json"))
+
+    @unittest.skipUnless(os.name == "nt", "互斥体判活只有 Windows 实现")
+    def test_gui_running_false_without_window(self):
+        self.assertFalse(R.gui_running(tmpdir() / "hosts.json"))
 
 
 if __name__ == "__main__":

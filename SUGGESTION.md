@@ -1,4 +1,4 @@
-# ssh-mcp 优化建议
+# ssh-marshal 优化建议
 
 给不在本会话里的 Agent 看的。追加式，新条目往顶部加。
 
@@ -18,7 +18,7 @@
 
 **Agent 只能提议；必须经用户同意才落到这个文件。**
 
-使用 ssh-mcp 的过程中发现可优化的地方，先回报三点就好 —— 现状与痛点、建议做法、预期收益（有代价一并说）。用户点头之后才写条目；没点头不写，也不要顺手改代码。
+使用 ssh-marshal 的过程中发现可优化的地方，先回报三点就好 —— 现状与痛点、建议做法、预期收益（有代价一并说）。用户点头之后才写条目；没点头不写，也不要顺手改代码。
 
 每条写清：日期、现状与痛点、建议做法、预期收益、代价与风险、涉及的文件与行号（若已定位）、有没有实测支撑。没实测过的猜想照实标「未实测」，别写成结论。
 
@@ -30,26 +30,26 @@
 
 **已实现（2026-10-14，ab160ef）**：pull 按「长度未知」读到 EOF、bytes/chunks 报实际落盘量、total_limit 按已写字节判、st_size=0 不续传；get_file 对 st_size=0 跳过二次 md5（`md5_check: skipped_st_size_0`）、FIFO 直接拒（会挂住等写者）。真机：/proc/cpuinfo 由 0 字节 → 48142 字节 verified；/sys 的 bytes 虚报 → 实际值（18）。
 
-- **现状与痛点**：`ssh_xfer.py:132` 用 `sftp.stat(remote).st_size` 规划要搬多少字节，`ssh_xfer.py:84`（`_write_blocks` 里）的写循环条件是 `while sent < total`。`/proc/*` 这类伪文件的 `st_size` 是 **0**，于是 `total = size - base = 0`，循环一次都不进，**落盘 0 字节**。随后 `ssh_mcp.py:1039-1044` 比对两侧 md5：远端算的是真实内容哈希、本地是空文件哈希 → 报 `md5_match: false`。所以这不是"静默产出错数据"（我一开始这么判断，读了校验环节才推翻），而是**永远抓不到、且报错原因指向错方向**。
+- **现状与痛点**：`ssh_xfer.py:132` 用 `sftp.stat(remote).st_size` 规划要搬多少字节，`ssh_xfer.py:84`（`_write_blocks` 里）的写循环条件是 `while sent < total`。`/proc/*` 这类伪文件的 `st_size` 是 **0**，于是 `total = size - base = 0`，循环一次都不进，**落盘 0 字节**。随后 `ssh_marshal.py:1039-1044` 比对两侧 md5：远端算的是真实内容哈希、本地是空文件哈希 → 报 `md5_match: false`。所以这不是"静默产出错数据"（我一开始这么判断，读了校验环节才推翻），而是**永远抓不到、且报错原因指向错方向**。
 - **`/sys` 不在受害面里（2026-10-14 补测）**：`/sys/class/net/lo/address`、`/sys/kernel/vmcoreinfo` 的 `st_size` 实测是 **4096** 不是 0；读到内容尾遇 EOF 会提前停，实测落盘 18 字节、`md5_match:true`，能读。只是同一次返回里 `bytes:4096`、`chunks:1` 是按 stat **虚报**的（实际 18 字节）——同属"拿 st_size 当真相"这一个根因。
-- **反差值得单独记**：`elevate=true` 路径先把远端内容 `cat` 进一个暂存文件（`ssh_mcp.py:1005-1014`），暂存的是普通文件、有真实大小，于是**提权读得到、普通账号读不到**。使用者很容易误判成权限不足而不是实现缺陷。
+- **反差值得单独记**：`elevate=true` 路径先把远端内容 `cat` 进一个暂存文件（`ssh_marshal.py:1005-1014`），暂存的是普通文件、有真实大小，于是**提权读得到、普通账号读不到**。使用者很容易误判成权限不足而不是实现缺陷。
 - **另一处同形问题**：`ssh_xfer.py:160-164` 的 `_remote_size` 在 `IOError` 时也返回 0 —— 同一个 `0` 同时表示"真的是空文件"和"大小取不到"，两种语义压在一个值上。
 - **建议做法**：`total` 允许为 `None` 表示长度未知，此时改流式读到 EOF（`block = src.read(chunk); if not block: break`）；`total_limit` 仍按已写字节判定，不放松上限。`_remote_size` 的失败与零值分开返回（`None` vs `0`）。
 - **预期收益**：`/proc` 这类 `st_size=0` 的可读文件一次拿到；失败时的信息从"md5 不符"变成直接说清原因。（FIFO 未测：两条路径都可能要等写者，先不承诺）
 - **代价与风险**：长度未知就失去了"按 size 判完整"的参照，**续传语义需要另定**——建议对 `size<=0` 一律不续传、整篇重读，避免把"上次读到 0 字节"当成有效续传点。改动集中在 `pull`，不影响 `push`。
-- **涉及文件**：`ssh_xfer.py:132`（stat）、`ssh_xfer.py:84`（写循环）、`ssh_xfer.py:160-164`（`_remote_size`）；调用侧 `ssh_mcp.py:1005-1014`（提权暂存）、`ssh_mcp.py:1039-1044`（md5 比对）。
+- **涉及文件**：`ssh_xfer.py:132`（stat）、`ssh_xfer.py:84`（写循环）、`ssh_xfer.py:160-164`（`_remote_size`）；调用侧 `ssh_marshal.py:1005-1014`（提权暂存）、`ssh_marshal.py:1039-1044`（md5 比对）。
 - **实测支撑**：**已真机复现**。`get_file(host="100", remote="/proc/cpuinfo")` 返回 `bytes:0`、`chunks:0`、`md5_local:d41d8cd9…`（即空文件的 MD5）、`md5_remote:b162153b…`、`md5_match:false`。
 - **顺带撞出的第二个问题**：失败时给的 hint 是「md5 不符，part 已保留：重调同一参数从缺口续传」——但这里**没有缺口可续**，重调只会再来一次 0 字节。对这类文件，续传提示本身就是误导，应改说"该远端路径无固定大小，建议直接执行 `cat`（或走 elevate 路径）"。
 
 ### 2026-10-11 · M2 `detach` / `job_log` 接口草案（参考实现已逐行核过，可直接照抄形状）
 
-**已实现（2026-10-14，ab160ef）**：`exec(detach=true)` + `job_status`（状态与增量输出合并、offset/offset_next 游标）+ `job_kill` + `job_list`；状态存远端 `~/.sshmcp-jobs/`；按本草案的取舍落地——status/output 合并成一个、本地二级缓存不做、elevate 的 detach 不做、out 合并流。真机：75 秒任务跨过 60 秒客户端上限正常取回。失联任务的回收：`job_kill` 对 `lost` 补写 killed 标记（见 README「后台任务」）。
+**已实现（2026-10-14，ab160ef）**：`exec(detach=true)` + `job_status`（状态与增量输出合并、offset/offset_next 游标）+ `job_kill` + `job_list`；状态存远端 `~/.sshmarshal-jobs/`；按本草案的取舍落地——status/output 合并成一个、本地二级缓存不做、elevate 的 detach 不做、out 合并流。真机：75 秒任务跨过 60 秒客户端上限正常取回。失联任务的回收：`job_kill` 对 `lost` 补写 killed 标记（见 README「后台任务」）。
 
 下面「`max_duration` 放开后仍不够」那条的落地稿。参考对象是 `classfang/ssh-mcp-server` 的 job 实现，我把它源码读完了，**下列细节都在代码里核实存在，不是文档转述**：`src/utils/remote-jobs.ts:7-22`（目录布局）、`:40-47`（存活状态机与 PID 复用防护）、`:50-60`（wrapper 与原子写 exit）、`src/tools/jobs.ts:43/66/100/118`（四个 `registerTool`）。
 
 **为什么必须做（不是优化项）**：从 Agent 侧发起调用时，客户端层约 60 秒会自行中断，`max_duration` 传多大都救不回来——本次 `npm i -g @deepseek-ai/dsh` 实测 3 次丢失结果（远端进程全程存活）。唯一出路是把"发起"和"取结果"拆成两次**都很快**的调用。
 
-**远端布局**（照抄，路径前缀换成我们自己的）：`$HOME/.ssh-mcp-jobs/<job_id>/`，内含 `cmd` 命令原文、`dir` 工作目录、`out` **stdout+stderr 合并**、`pid`、`started`、`exit`、`killed`。
+**远端布局**（照抄，路径前缀换成我们自己的）：`$HOME/.ssh-marshal-jobs/<job_id>/`，内含 `cmd` 命令原文、`dir` 工作目录、`out` **stdout+stderr 合并**、`pid`、`started`、`exit`、`killed`。
 
 - 关键取舍：**状态存远端文件系统，而不是存服务进程内存**。这样 MCP 服务重启、SSH 断连、Agent 换会话之后仍能接着轮询。对照案例：`tufantunc` 的 session 是进程内 Map（`src/ssh/session-manager.ts:31`），服务一死全丢；`bvisible` 更糟，session 超时即置 ERROR 态、后续命令全拒（`src/session-manager.js:118-131` 超时抛错、`:220` 置 ERROR、`:161` 门禁）。**这是三家唯一的分水岭，选错就白做。**
 - `exit` 用 `.tmp` + `mv` **原子发布**（`:54`），读侧永远不会看到半个退出码。
@@ -70,7 +70,7 @@
 
 **预期收益**：长任务不再受客户端硬上限牵连；判活从"Agent 手写 shell 技巧"变成工具语义，顺带消掉我本次实测到的两个判活假阴性（普通用户 `kill -0` 探 root 进程返回 EPERM 却看似"已退出"；`pgrep -f` 命中自身命令行导致轮询永不退出）。
 **代价与风险**：① 在远端 `$HOME` 下写文件，需要事先在文档写明路径与清理策略（保留 7 天后自删）；② 四个新工具会抬高 `tools/list` 体积，建议与下条的精简模式一起做；③ `out` 合并 stdout/stderr 后无法分离错误流，若要区分得改成两个文件；④ 需要有 job 数量上限，否则 job 泄漏。
-**涉及文件**：新增逻辑接在 `ssh_mcp.py:648`（`execute`）旁；落盘复用 `output_store.py`；`policy.json` 加 `job_retention_days` 与 `job_max_concurrent`。
+**涉及文件**：新增逻辑接在 `ssh_marshal.py:648`（`execute`）旁；落盘复用 `output_store.py`；`policy.json` 加 `job_retention_days` 与 `job_max_concurrent`。
 **实测支撑**：参考实现有（逐行核过）；我方尚未实现，收益部分是推断——其中"客户端 60 秒硬上限"有实测（25s/55s 通过、70s 以上丢结果），"offset 省上下文"是设计推论，**未实测**。
 
 ### 2026-10-11 · `max_duration` 放开后仍不够：客户端侧有独立的调用硬上限，`detach` 是唯一解（给既有 P1 条目补论据）
@@ -82,7 +82,7 @@
 - **预期收益**：一次性解决三类问题——长任务结果丢失、判活要靠手写 shell 轮询、以及 `idle_timeout` 按输出判活带来的误杀。
 - **外部设计参照**（本次实测取的样本）：`classfang/ssh-mcp-server` v1.10.0 只有 10 个工具，其中 `job-start / job-status / job-kill / job-list` 就是这套语义，且 `job-status` 的入参是 `jobId, offset, tailBytes, maxBytes`（分页 + 单次响应字节上限），`read-file` 也用 `offset, length`。可直接抄它的接口形状，落盘层复用现成的 `output_store`。
 - **代价与风险**：新增 4 个工具会抬高 `tools/list` 的上下文占用；job 需要生命周期与并发上限（否则 job 泄漏）。
-- **涉及文件**：`ssh_mcp.py:648`（`execute`）、`ssh_mcp.py:676`（`idle_s`）、`policy.json:3`、`ssh_guard.py:59`。
+- **涉及文件**：`ssh_marshal.py:648`（`execute`）、`ssh_marshal.py:676`（`idle_s`）、`policy.json:3`、`ssh_guard.py:59`。
 - **实测支撑**：有（上述 5 个时长样本 + 远端进程存活确认）。
 
 ### 2026-10-11 · 缺判活原语，导致 Agent 手写轮询时踩到 `kill -0` 的权限假阴性
@@ -93,7 +93,7 @@
 - **建议做法**：给 `exec` 加 `wait_pid=<pid>` / `wait_file=<path>` 语义（内部用 `/proc` 判活并按 `idle_timeout` 心跳输出），或在 README「判活」一节写死：跨用户判活必须带 `elevate`，且 `pgrep -f` 的模式不得与自身命令行重合。
 - **预期收益**：消掉两类静默误判——这两类都不是报错，是**返回了错误的结论**，比报错更贵。
 - **代价与风险**：`wait_*` 若做成阻塞调用会重新撞上 60 秒上限，必须做成"查一次就返回"的非阻塞探针。
-- **涉及文件**：`ssh_mcp.py:648` 附近；文档 `README.md:147`。
+- **涉及文件**：`ssh_marshal.py:648` 附近；文档 `README.md:147`。
 - **实测支撑**：有（两条都在 100 上复现过）。
 
 ### 2026-10-11 · `list_hosts` 没有精简模式，`exec` 原样回显整条命令
@@ -104,7 +104,7 @@
 - **建议做法**：`list_hosts(brief=true)` 或 `fields=` 只回别名/地址/auth/pin_source；把 `limits` 挪到单独工具或只在首次返回。`exec` 加 `echo_command`（默认 `false`，或超过 N 字符时截断）。stdout 超阈值时默认只回摘要 + `output_id`——`read_output` 已经存在，缺的是让它成为默认路径。
 - **预期收益**：长会话里 Agent 的上下文占用显著下降，同样任务能塞进更多轮次。
 - **代价与风险**：不回显命令会让"哪条命令产生了这个输出"的审计需要另找来源（`audit_tail` 可以承担，要一并写明）。
-- **涉及文件**：`ssh_mcp.py:785-788`（limits/inline_output 载荷）、`ssh_mcp.py:806`。
+- **涉及文件**：`ssh_marshal.py:785-788`（limits/inline_output 载荷）、`ssh_marshal.py:806`。
 - **实测支撑**：有（字节数是实测相加，比例是估算）。
 
 ### 2026-10-11 · 凭据从 password 切到 key 后，`elevate_password_from: "password"` 的语义要写明
@@ -114,5 +114,5 @@
 - **现状与痛点**：100 改仅密钥登录后，`auth` 变成 `"key"`，但 `elevate` 仍靠登录口令工作（实测 `ran_as: root` 正常）。`list_hosts` 里 `elevate_password_from: "password"` 字面上像"仍用密码认证"，容易让人误判凭据配置没改过来——本次就因此多绕了一轮排查。
 - **建议做法**：在 README 或 `list_hosts` 输出里把两者区分清楚：登录认证方式（`auth`）与提权口令来源（`elevate_password_from`）是两个独立字段，后者在前者为 `key` 时依旧有效，因为口令只喂给 `sudo -S` 的 channel stdin。
 - **预期收益**：减少把"仍能提权"误读成"密码登录还开着"的判断。
-- **代价与风险**：无。顺带一条外部对照支持这个设计：`bvisible/mcp-ssh-manager` 的 `ssh_execute_sudo` 把 `password` 做成**工具入参**，也就是提权口令会流经模型上下文；`ssh-mcp` 用服务端 stdin 注入而不进命令行/history/审计的形状更好，值得在文档里明确点出这个差别。
+- **代价与风险**：无。顺带一条外部对照支持这个设计：`bvisible/mcp-ssh-manager` 的 `ssh_execute_sudo` 把 `password` 做成**工具入参**，也就是提权口令会流经模型上下文；`ssh-marshal` 用服务端 stdin 注入而不进命令行/history/审计的形状更好，值得在文档里明确点出这个差别。
 - **实测支撑**：有。

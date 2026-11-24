@@ -5,7 +5,7 @@
 #     "paramiko>=3.4",
 # ]
 # ///
-"""ssh-mcp —— 常驻 SSH 会话的 MCP 服务：连接复用、全文日志、凭据注入。
+"""ssh-marshal —— 常驻 SSH 会话的 MCP 服务：连接复用、全文日志、凭据注入。
 
 2026-09-29 起解除权限控制：原 ro 白名单 / rw 黑名单 / 人工 grant 三层判定全部移除
 （命令过滤挡不住蓄意绕行的 AI，却给每一条正常命令加了一轮往返）。服务端只在
@@ -13,9 +13,9 @@
 exec(force=true) 直接放行。真正的边界是远端账号自己的权限。
 
 用法：
-    ssh_mcp.py [serve]                                  # 作为 MCP 服务跑（stdio）
-    ssh_mcp.py doctor                                   # 检查配置与凭据
-    ssh_mcp.py list                                     # 列出主机与指纹固定状态
+    ssh_marshal.py [serve]                                  # 作为 MCP 服务跑（stdio）
+    ssh_marshal.py doctor                                   # 检查配置与凭据
+    ssh_marshal.py list                                     # 列出主机与指纹固定状态
 
 约定：stdout 被 MCP 协议独占，本文件所有日志一律走 stderr。
 """
@@ -51,6 +51,7 @@ import ssh_guard as G  # noqa: E402
 import ssh_jobs as J  # noqa: E402
 import ssh_xfer as X  # noqa: E402
 import output_store as OS  # noqa: E402
+import hostreg as H  # noqa: E402 - 只用来拉起/判活 GUI，服务本身不读写凭据文件
 from ssh_probe import (  # noqa: E402 - 探测/私钥逻辑与 GUI 共用，见 ssh_probe.py
     HostKeyMismatch,
     build_pinned_policy as _build_pinned_policy,
@@ -78,9 +79,9 @@ def _downloads_dir() -> Path:
 
 
 def xfer_dir(guard: G.GuardConfig) -> Path:
-    """优先级：SSHMCP_XFER 环境变量 > policy.json 的 defaults.xfer_dir > 平台下载目录。"""
-    if os.environ.get("SSHMCP_XFER"):
-        return Path(os.environ["SSHMCP_XFER"]).expanduser()
+    """优先级：SSHMARSHAL_XFER 环境变量 > policy.json 的 defaults.xfer_dir > 平台下载目录。"""
+    if os.environ.get("SSHMARSHAL_XFER"):
+        return Path(os.environ["SSHMARSHAL_XFER"]).expanduser()
     if guard.xfer_dir:
         return Path(guard.xfer_dir).expanduser()
     return _downloads_dir()
@@ -91,25 +92,25 @@ def _path_from_env(var: str, default: Path) -> Path:
     return Path(raw).expanduser() if raw else default
 
 
-HOME_DIR = _path_from_env("SSHMCP_HOME", HERE)
-POLICY_PATH = _path_from_env("SSHMCP_POLICY", HOME_DIR / "policy.json")
-HOSTS_PATH = _path_from_env("SSHMCP_HOSTS", HOME_DIR / "ssh_mcp_hosts.json")
-HOSTKEYS_PATH = _path_from_env("SSHMCP_HOSTKEYS", HOME_DIR / "hostkeys.json")
-AUDIT_PATH = _path_from_env("SSHMCP_AUDIT", HOME_DIR / "audit" / "ssh-mcp.jsonl")
-OUTPUT_ROOT = _path_from_env("SSHMCP_OUTPUT", HOME_DIR / "output")
+HOME_DIR = _path_from_env("SSHMARSHAL_HOME", HERE)
+POLICY_PATH = _path_from_env("SSHMARSHAL_POLICY", HOME_DIR / "policy.json")
+HOSTS_PATH = _path_from_env("SSHMARSHAL_HOSTS", HOME_DIR / "ssh_marshal_hosts.json")
+HOSTKEYS_PATH = _path_from_env("SSHMARSHAL_HOSTKEYS", HOME_DIR / "hostkeys.json")
+AUDIT_PATH = _path_from_env("SSHMARSHAL_AUDIT", HOME_DIR / "audit" / "ssh-marshal.jsonl")
+OUTPUT_ROOT = _path_from_env("SSHMARSHAL_OUTPUT", HOME_DIR / "output")
 
 # 回给 Agent 的内联预算（字节）。全文在 output/ 里，想看随时 read_output 捞。
 INLINE_OUT = (4096, 4096)
 INLINE_ERR = (1024, 2048)
-BACKUPS_DIRNAME = ".sshmcp-backups"
-OUTPUT_KEEP_RUNS = int(os.environ.get("SSHMCP_OUTPUT_KEEP_RUNS", "200"))
-OUTPUT_KEEP_BYTES = int(os.environ.get("SSHMCP_OUTPUT_KEEP_BYTES", str(500 * 1024 * 1024)))
-OUTPUT_KEEP_DAYS = int(os.environ.get("SSHMCP_OUTPUT_KEEP_DAYS", "14"))
-AUDIT_KEEP_DAYS = int(os.environ.get("SSHMCP_AUDIT_KEEP_DAYS", "14"))
+BACKUPS_DIRNAME = ".sshmarshal-backups"
+OUTPUT_KEEP_RUNS = int(os.environ.get("SSHMARSHAL_OUTPUT_KEEP_RUNS", "200"))
+OUTPUT_KEEP_BYTES = int(os.environ.get("SSHMARSHAL_OUTPUT_KEEP_BYTES", str(500 * 1024 * 1024)))
+OUTPUT_KEEP_DAYS = int(os.environ.get("SSHMARSHAL_OUTPUT_KEEP_DAYS", "14"))
+AUDIT_KEEP_DAYS = int(os.environ.get("SSHMARSHAL_AUDIT_KEEP_DAYS", "14"))
 
 
 def log(msg: str) -> None:
-    print(f"[ssh-mcp] {msg}", file=sys.stderr, flush=True)
+    print(f"[ssh-marshal] {msg}", file=sys.stderr, flush=True)
 
 
 def now_utc() -> datetime:
@@ -258,8 +259,8 @@ def effective_pin(alias: str, cred: HostCred | None) -> tuple[str, str]:
 # --------------------------------------------------------------------------------------
 
 
-_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("ssh_mcp_call_id", default=None)
-_CALL_TOOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("ssh_mcp_call_tool", default=None)
+_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("ssh_marshal_call_id", default=None)
+_CALL_TOOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("ssh_marshal_call_tool", default=None)
 _AUDIT_LOCK = threading.Lock()
 _OUTPUT_HOSTS: dict[str, str] = {}
 _OUTPUT_HOSTS_LOCK = threading.Lock()
@@ -287,7 +288,7 @@ def audit(record: dict) -> None:
 
 
 def _audit_files() -> list[Path]:
-    """当前文件 + 轮转出去的 ssh-mcp.YYYYMMDD[-n].jsonl，按 mtime 从旧到新。"""
+    """当前文件 + 轮转出去的 ssh-marshal.YYYYMMDD[-n].jsonl，按 mtime 从旧到新。"""
     if not AUDIT_PATH.parent.is_dir():
         return []
     stem, suffix = AUDIT_PATH.stem, AUDIT_PATH.suffix
@@ -425,6 +426,7 @@ _AUDIT_ARGS = {
     "job_status": ("host", "job_id", "offset", "max_bytes"),
     "job_kill": ("host", "job_id"),
     "job_list": ("host", "limit"),
+    "hosts_gui": ("action",),
 }
 
 _RESULT_FIELDS = (
@@ -465,6 +467,8 @@ def _summarize_result(tool: str, result) -> dict:
         return {"type": type(result).__name__}
     out = {k: _clip(result[k]) for k in _RESULT_FIELDS if k in result and result[k] is not None}
     if tool == "list_hosts":
+        out["host_count"] = len(result.get("hosts") or [])
+    elif tool == "hosts_gui":
         out["host_count"] = len(result.get("hosts") or [])
     elif tool == "audit_tail":
         out["record_count"] = len(result.get("records") or [])
@@ -736,7 +740,7 @@ def _drain(chan, idle_s: float, deadline: float, spill: OS.Spill) -> RunResult:
             why = bound
             break
         except (socket.error, OSError) as exc:
-            take(f"\n[ssh-mcp] 通道异常：{type(exc).__name__}: {exc}".encode(), True)
+            take(f"\n[ssh-marshal] 通道异常：{type(exc).__name__}: {exc}".encode(), True)
             why = f"channel_error:{type(exc).__name__}"
             break
         if not chunk:
@@ -820,7 +824,7 @@ def _assemble_remote(command: str, cwd: str, cred: HostCred, login_shell: bool =
         cd_prefix = f"cd {_cd_expr(cwd)} && " if cwd not in ("", "~") else ""
         init = f". {_cd_expr(cred.shell_init)}"
         # 初始化失败要能一眼看出：固定提示 + exit 97，别混成用户命令的退出码
-        body = f"{cd_prefix}{{ {init}; }} || {{ echo '[sshmcp] shell_init 失败' >&2; exit 97; }}; {command}"
+        body = f"{cd_prefix}{{ {init}; }} || {{ echo '[sshmarshal] shell_init 失败' >&2; exit 97; }}; {command}"
     else:
         body = command if cwd in ("", "~") else f"cd {_cd_expr(cwd)} && {command}"
     if login_shell:
@@ -952,7 +956,7 @@ def _backup_target_name(target: str, index: int) -> str:
 
 
 def _backup_remote_targets(alias, cred, pin, targets, cwd, guard, elevate: bool = False) -> tuple[str | None, str | None]:
-    """把 targets 中存在的文件备份到远端 ~/.sshmcp-backups/<时间戳>-<短id>/。
+    """把 targets 中存在的文件备份到远端 ~/.sshmarshal-backups/<时间戳>-<短id>/。
 
     返回 (backup_dir, error)。error 非空时调用方必须拒绝执行原命令；
     目标不存在不算失败（新建文件没有可备份的旧内容）。
@@ -1186,7 +1190,7 @@ def _tool_list_hosts(brief: bool = False) -> dict:
                     "max_output_file_bytes": guard.max_output_bytes,
                     "inline_output": f"stdout 头 {INLINE_OUT[0]}B + 尾 {INLINE_OUT[1]}B（stderr {INLINE_ERR[0]}/{INLINE_ERR[1]}），全文用 read_output(output_id) 回捞",
                     "output_retention": f"{OUTPUT_KEEP_DAYS} 天 / ≤{OUTPUT_KEEP_RUNS} run / ≤{OUTPUT_KEEP_BYTES // 1048576}MB",
-                    "audit_retention": f"{AUDIT_KEEP_DAYS} 天（按天轮转，SSHMCP_AUDIT_KEEP_DAYS）",
+                    "audit_retention": f"{AUDIT_KEEP_DAYS} 天（按天轮转，SSHMARSHAL_AUDIT_KEEP_DAYS）",
                     "xfer_dir": str(xfer_dir(guard)),
                     "max_transfer_bytes": guard.max_transfer_bytes,
                     "xfer_chunk_bytes": guard.xfer_chunk_bytes,
@@ -1210,6 +1214,32 @@ def _tool_list_hosts(brief: bool = False) -> dict:
         "guarded_hosts": sorted(guard.guarded_hosts),
         "unpinned": [a for a in sorted(creds) if not effective_pin(a, creds[a])[0]],
         "note": "无权限控制：killlist（root 账号恒查 + guarded_hosts 点名的非 root 主机 + 任何带 elevate 的命令，exec 用 force=true 可越过）之外一律放行，真正的边界是远端账号自己的权限。被拦下的命令不会建立连接。",
+    }
+
+
+def _tool_hosts_gui(action: str = "open") -> dict:
+    """打开主机配置窗口；status 只查状态。窗口里的保存走 hostreg 的原子写与自动备份。"""
+    if action not in ("open", "status"):
+        return {"ok": False, "error": 'action 只能是 "open" 或 "status"'}
+    running = H.gui_running(HOSTS_PATH)
+    launched = False
+    pid = None
+    if action == "open" and not running:
+        result = H.launch_gui(HOSTS_PATH)
+        if not result.get("ok"):
+            return {"ok": False, **result}
+        launched = not result.get("reused")
+        running = bool(result.get("running"))
+        pid = result.get("pid")
+    return {
+        "ok": True,
+        "action": action,
+        "path": str(HOSTS_PATH),
+        "running": running,
+        "launched": launched,
+        "pid": pid,
+        "file": H.file_digest(HOSTS_PATH),
+        "hosts": sorted(HOSTS.get()),
     }
 
 
@@ -1257,7 +1287,7 @@ def _tool_pin_hostkey(host: str, trust: bool = False) -> dict:
     return out
 
 
-STAGING_DIRNAME = ".sshmcp-xfer"
+STAGING_DIRNAME = ".sshmarshal-xfer"
 
 
 def _sftp_of(alias: str, cred: HostCred, pin: str):
@@ -2057,12 +2087,48 @@ def _import_highlevel_server():
 
 def build_server():
     server_class = _import_highlevel_server()
-    server = server_class("ssh-mcp")
+    from mcp.types import ToolAnnotations
 
-    @server.tool(name="list_hosts", description="列出凭据文件里的主机、指纹固定状态、是否受 killlist 保护及其原因。brief=true 只回短字段（不带每台的 limits 与全量 killlist），省上下文。不含任何密码。")
+    def _hints(read_only: bool, destructive: bool, idempotent: bool, open_world: bool) -> ToolAnnotations:
+        return ToolAnnotations(
+            read_only_hint=read_only,
+            destructive_hint=destructive,
+            idempotent_hint=idempotent,
+            open_world_hint=open_world,
+        )
+
+    server = server_class(
+        "ssh-marshal",
+        instructions=(
+            "用户说想新增/修改/停用服务器，或工具返回 credential_missing / host_key_unpinned 时，"
+            "先调用 hosts_gui(action=\"open\") 打开主机配置窗口，把窗口交给用户操作，不要替用户填表或保存；"
+            "用户明确说配置完成后，再调用 hosts_gui(action=\"status\") 比对 file.sha256 与 hosts（或直接 list_hosts）"
+            "确认改动，然后继续下一步（如 pin_hostkey、试连）。不要读写凭据文件。"
+        ),
+    )
+
+    @server.tool(name="list_hosts", description="列出凭据文件里的主机、指纹固定状态、是否受 killlist 保护及其原因。brief=true 只回短字段（不带每台的 limits 与全量 killlist），省上下文。不含任何密码。", annotations=_hints(True, False, True, False))
     @_audited("list_hosts")
     async def _list_hosts(brief: bool = False) -> dict:
         return _tool_list_hosts(brief)
+
+    @server.tool(
+        name="hosts_gui",
+        description=(
+            "打开主机清单图形界面（tkinter 窗口），用户在窗口里增删改服务器、探测指纹、测试连接。"
+            "用户说「想加一台服务器 / 改某台主机配置 / 换口令」，或工具返回 credential_missing / host_key_unpinned 时调用。"
+            "action=open：窗口已开着就复用，否则以 detached 方式拉起（服务重启不会带走窗口），等窗口建好再返回；"
+            "返回 running、file.sha256 与现有 hosts。随后把窗口交给用户操作，不要替用户填表或保存；"
+            "用户明确说配置完成后，再调 action=status 比对 file.sha256 与 hosts，或用 list_hosts 确认新主机，再继续下一步。"
+            "action=status：只查窗口是否还开着、文件是否变过，不拉新窗口。返回不含任何密码。"
+        ),
+        annotations=_hints(False, False, True, False),
+    )
+    @_audited("hosts_gui")
+    async def _hosts_gui(action: str = "open") -> dict:
+        import anyio
+
+        return await anyio.to_thread.run_sync(lambda: _tool_hosts_gui(action))
 
     @server.tool(
         name="exec",
@@ -2075,10 +2141,11 @@ def build_server():
             "elevate=true 以 root 跑这一条（凭据里该主机须 elevate:true）——服务端用 sudo -S 并把口令写进"
             "channel stdin，口令不进命令行、不进审计、不进远端 history；提权命令一律查清单。"
             "detach=true 把这条命令丢到远端后台跑并立刻返回 job_id（用 job_status 取状态与输出、job_kill 停掉）"
-            "——状态存在远端 ~/.sshmcp-jobs/，服务重启/断连/换会话都不丢；v1 与 elevate 互斥。"
+            "——状态存在远端 ~/.sshmarshal-jobs/，服务重启/断连/换会话都不丢；v1 与 elevate 互斥。"
             "login_shell=true 用 bash -lc 跑（读 profile，拿到登录会话的环境变量与 PATH）；"
             "凭据里配了 shell_init 的机器会先 source 那段片段再跑命令。"
         ),
+        annotations=_hints(False, True, False, True),
     )
     @_audited("exec")
     async def _exec(
@@ -2107,6 +2174,7 @@ def build_server():
             "把它与已有 pinned 一并报给用户核对，确认无误后再带 trust=true 调一次落盘。"
             "探测只做到密钥交换，不发送用户名与密码。凭据文件里已钉的 hostKey 由人自己改，这里覆盖不了。"
         ),
+        annotations=_hints(False, False, True, True),
     )
     @_audited("pin_hostkey")
     async def _pin_hostkey(host: str, trust: bool = False) -> dict:
@@ -2121,11 +2189,12 @@ def build_server():
             "写入目标受 exec 那张清单约束（authorized_keys/sshd_config/sudoers 之类会被拦），force=true 可越过"
             "（建议同时用 force_reason 写一句为什么，进审计）。"
             "远端已存在同名文件时默认拒绝，要覆盖带 overwrite=true。"
-            "elevate=true 走两段式：先落到远端 ~/.sshmcp-xfer/ 再 sudo install 到目标（/root、/etc 只有这样才能写）。"
+            "elevate=true 走两段式：先落到远端 ~/.sshmarshal-xfer/ 再 sudo install 到目标（/root、/etc 只有这样才能写）。"
             "recursive=true 把本机目录整棵推上去：逐文件续传 + md5，空目录也建，符号链接与特殊文件跳过；"
             "每个目标文件都过敏感路径清单；不做 rsync --delete，远端多余文件不动。v1 与 elevate 互斥。"
             "上限取 policy.json 的 defaults.max_transfer_bytes 与 xfer_max_files。"
         ),
+        annotations=_hints(False, True, True, True),
     )
     @_audited("put_file")
     async def _put_file(
@@ -2155,6 +2224,7 @@ def build_server():
             "recursive=true 把远端目录整棵拉回：逐文件续传 + md5，空目录也建，符号链接与 FIFO 等特殊文件跳过；"
             "同样受 max_transfer_bytes 与 xfer_max_files 限制，不做删除式同步。v1 与 elevate 互斥。"
         ),
+        annotations=_hints(False, True, True, True),
     )
     @_audited("get_file")
     async def _get_file(
@@ -2175,6 +2245,7 @@ def build_server():
     @server.tool(
         name="xfer_stat",
         description="取远端文件的 size/mode/uid/mtime，用于传前判断该不该传（比 exec ls -l 少一次文本解析）。不建立传输。",
+        annotations=_hints(True, False, True, True),
     )
     @_audited("xfer_stat")
     async def _xfer_stat(host: str, remote: str) -> dict:
@@ -2182,14 +2253,14 @@ def build_server():
 
         return await anyio.to_thread.run_sync(lambda: _tool_xfer_stat(host, remote))
 
-    @server.tool(name="session_reset", description="丢弃某主机的 SSH 连接与 cwd 状态并重新握手。若有命令在途则返回 busy（reset=false），不强杀在途命令。")
+    @server.tool(name="session_reset", description="丢弃某主机的 SSH 连接与 cwd 状态并重新握手。若有命令在途则返回 busy（reset=false），不强杀在途命令。", annotations=_hints(False, False, True, True))
     @_audited("session_reset")
     async def _session_reset(host: str) -> dict:
         import anyio
 
         return await anyio.to_thread.run_sync(lambda: _tool_session_reset(host))
 
-    @server.tool(name="audit_tail", description="读回最近的审计记录（含被拒命令），用于自查拒绝原因。only_risky=true 只回被拦、强制越过、失败、异常和敏感写备份。")
+    @server.tool(name="audit_tail", description="读回最近的审计记录（含被拒命令），用于自查拒绝原因。only_risky=true 只回被拦、强制越过、失败、异常和敏感写备份。", annotations=_hints(True, False, True, False))
     @_audited("audit_tail")
     async def _audit_tail(host: str | None = None, limit: int = 50, only_risky: bool = False) -> dict:
         return _tool_audit_tail(host, limit, only_risky)
@@ -2201,6 +2272,7 @@ def build_server():
             "mode：head/tail 按行边界取，grep 返回带行号的命中（pattern 是子串匹配，不是正则），lines 取 [start,end] 行。"
             "典型用法：grep 'error' 拿到行号，再用 lines(start=行号-20, end=行号+40) 看上下文。"
         ),
+        annotations=_hints(True, False, True, False),
     )
     @_audited("read_output")
     async def _read_output(
@@ -2221,6 +2293,7 @@ def build_server():
             "不给 offset 就回最后 max_bytes 字节；给了 offset 就从该字节读，返回值里的 offset_next 供下次只取新增部分。"
             "state：running/exited/killed/lost/missing。输出在远端 out 文件里，不占本机 output/ 配额。"
         ),
+        annotations=_hints(True, False, True, True),
     )
     @_audited("job_status")
     async def _job_status(host: str, job_id: str, offset: int | None = None, max_bytes: int = 65536) -> dict:
@@ -2234,6 +2307,7 @@ def build_server():
             "停掉一个远端后台任务：先对整个进程组 SIGTERM，5 秒不退再 SIGKILL，外加子进程树兜底。"
             "杀前核对进程命令行里确实是这个 job id（防 PID 复用误杀）；已结束的任务只会返回 not_running。"
         ),
+        annotations=_hints(False, True, True, True),
     )
     @_audited("job_kill")
     async def _job_kill(host: str, job_id: str) -> dict:
@@ -2247,6 +2321,7 @@ def build_server():
             "列远端最近的后台任务及状态（running/exited/killed/lost），用于找孤儿任务与清理。"
             "保留期与并发上限取 policy.json 的 defaults.job_retention_days / job_max_concurrent。"
         ),
+        annotations=_hints(True, False, True, True),
     )
     @_audited("job_list")
     async def _job_list(host: str, limit: int = 20) -> dict:
@@ -2326,7 +2401,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     dest = xfer_dir(guard)
     try:
         dest.mkdir(parents=True, exist_ok=True)
-        probe = dest / ".sshmcp-write-probe"
+        probe = dest / ".sshmarshal-write-probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
         free = shutil.disk_usage(str(dest)).free
@@ -2365,7 +2440,7 @@ def cmd_serve(_: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="ssh-mcp", description="常驻 SSH 会话的 MCP 服务")
+    ap = argparse.ArgumentParser(prog="ssh-marshal", description="常驻 SSH 会话的 MCP 服务")
     sub = ap.add_subparsers(dest="sub")
     sub.add_parser("serve", help="以 stdio 跑 MCP 服务（默认）").set_defaults(func=cmd_serve)
     sub.add_parser("doctor", help="检查配置/凭据/依赖").set_defaults(func=cmd_doctor)

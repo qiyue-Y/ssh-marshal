@@ -16,15 +16,15 @@ import time
 import unittest
 from pathlib import Path
 
-import ssh_mcp as S
+import ssh_marshal as S
 
 
 class AuditBase(unittest.TestCase):
     def setUp(self):
-        self.dir = Path(tempfile.mkdtemp(prefix="ssh-mcp-audit-test-"))
+        self.dir = Path(tempfile.mkdtemp(prefix="ssh-marshal-audit-test-"))
         self._old_path = S.AUDIT_PATH
         self._old_keep = S.AUDIT_KEEP_DAYS
-        S.AUDIT_PATH = self.dir / "ssh-mcp.jsonl"
+        S.AUDIT_PATH = self.dir / "ssh-marshal.jsonl"
         S.AUDIT_KEEP_DAYS = 14
         with S._OUTPUT_HOSTS_LOCK:
             S._OUTPUT_HOSTS.clear()
@@ -134,12 +134,12 @@ class AuditWrites(AuditBase):
         os.utime(S.AUDIT_PATH, (old, old))
 
         S.audit({"host": "h1", "event": "new"})
-        expected = f"ssh-mcp.{time.strftime('%Y%m%d', time.gmtime(old))}.jsonl"
+        expected = f"ssh-marshal.{time.strftime('%Y%m%d', time.gmtime(old))}.jsonl"
         self.assertTrue((self.dir / expected).is_file(), f"应按日期轮转到 {expected}")
         self.assertEqual([r["event"] for r in self.records()], ["new", "old"])
 
     def test_rotated_file_older_than_keep_days_is_pruned(self):
-        stale = self.dir / "ssh-mcp.20200101.jsonl"
+        stale = self.dir / "ssh-marshal.20200101.jsonl"
         stale.write_text(json.dumps({"host": "old", "event": "intent"}) + "\n", encoding="utf-8")
         old = time.time() - 15 * 86400
         os.utime(stale, (old, old))

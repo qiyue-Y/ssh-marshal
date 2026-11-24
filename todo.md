@@ -1,4 +1,4 @@
-# ssh-mcp 优化任务清单
+# ssh-marshal 优化任务清单
 
 本文件是 `DESIGN.md` 的执行版。每条都写清：现状、目标、范围、验收、风险/回退。完成一项就把「状态」改成「已完成」，并补一句实测证据。
 
@@ -30,7 +30,7 @@
 - `prune` 并发安全、文件消失不报错。
 
 **范围**
-- `ssh_mcp.py`：`Pool`、`run_command`、`_tool_session_reset`、`_tool_put_file`、`_tool_get_file`、`_tool_xfer_stat`、`_tool_job_status`。
+- `ssh_marshal.py`：`Pool`、`run_command`、`_tool_session_reset`、`_tool_put_file`、`_tool_get_file`、`_tool_xfer_stat`、`_tool_job_status`。
 - `output_store.py`：`prune`。
 - `test_connect_refusals.py`：新增并发用例。
 - 不改 `policy.json`，不新增工具，不改 MCP schema。
@@ -72,7 +72,7 @@
 **范围**
 - `policy.json`：扩展 `killlist`。
 - `ssh_guard.py`：必要的匹配辅助（若现有多 token 前缀规则够用则不改逻辑）。
-- `ssh_mcp.py`：`exec` / `put_file` 的 `force` 旁增加 `force_reason` 字段并写入审计；MCP schema 增加可选参数。
+- `ssh_marshal.py`：`exec` / `put_file` 的 `force` 旁增加 `force_reason` 字段并写入审计；MCP schema 增加可选参数。
 - `README.md`：清单边界与 `force_reason` 用法。
 - `test_ssh_guard.py`：每类至少一条命中 + 一条不误杀。
 
@@ -93,7 +93,7 @@
 
 **实测证据**
 - `ssh_guard.sensitive_write_targets()` 覆盖写重定向、`tee`、`rm`/`cp`/`mv`/`install`/`ln`/`sed -i`/`truncate`；`cat`、`cp` 的源、无 `-i` 的 `sed`、`sed -n` 脚本都不误报；`mv` 两个敏感路径都会列出来。
-- `exec` 与 `put_file` 都会在写入前备份到远端 `~/.sshmcp-backups/<时间戳>-<短id>/`；备份失败返回 `{blocked:true, reason:"backup_failed"}`，原文件不动；返回值和审计带 `backup` 路径。
+- `exec` 与 `put_file` 都会在写入前备份到远端 `~/.sshmarshal-backups/<时间戳>-<短id>/`；备份失败返回 `{blocked:true, reason:"backup_failed"}`，原文件不动；返回值和审计带 `backup` 路径。
 - `audit_tail(only_risky=true)` 只回 blocked / forced / 失败 / 异常 / 备份；正常成功命令不出现。
 - 离线：`test_connect_refusals.py` 77 例全绿（新增 5 条备份 + 1 条 only_risky）；`test_ssh_guard.py` 35 例全绿（新增 2 条写目标清单用例）。
 - 真机 100（只用 `/tmp` 临时 `authorized_keys`）：`exec rm` 后备份文件 `00-authorized_keys` 存在；`put_file` 覆盖前备份内容为 `old`，覆盖成功；临时文件与备份目录已清理。
@@ -102,11 +102,11 @@
 - 改 `sshd_config`、`authorized_keys` 这类文件改坏了不可回滚；审计全文原样落盘，用户不会逐条看。
 
 **目标**
-- exec 的重定向/tee、`put_file` 覆盖命中敏感目标时，先备份到 `~/.sshmcp-backups/<时间戳>/`，备份失败则拒绝执行；返回值与审计带 `backup` 路径。
+- exec 的重定向/tee、`put_file` 覆盖命中敏感目标时，先备份到 `~/.sshmarshal-backups/<时间戳>/`，备份失败则拒绝执行；返回值与审计带 `backup` 路径。
 - `audit_tail` 增加 `only_risky=true`，只回 blocked / forced / 失败 / 敏感写。
 
 **范围**
-- `ssh_mcp.py`：敏感写路径、备份命令、`audit_tail`。
+- `ssh_marshal.py`：敏感写路径、备份命令、`audit_tail`。
 - `ssh_guard.py`：复用 `SENSITIVE_WRITE_TARGETS`。
 - `README.md`、`test_connect_refusals.py`、`test_audit.py`。
 
@@ -127,11 +127,11 @@
 
 **实测证据**
 - `exec(login_shell=true)` → 实际下发 `bash -lc '<cd 前缀 + 命令>'`；默认为空时不改变任何既有命令串。
-- 凭据字段 `shell_init`（也接受 `shellInit`）：顺序为 `cd <cwd> && { . <init>; } || { echo '[sshmcp] shell_init 失败' >&2; exit 97; }; <命令>`；失败返回 97，不与用户命令退出码混淆。
+- 凭据字段 `shell_init`（也接受 `shellInit`）：顺序为 `cd <cwd> && { . <init>; } || { echo '[sshmarshal] shell_init 失败' >&2; exit 97; }; <命令>`；失败返回 97，不与用户命令退出码混淆。
 - `shell_init` 只在用户命令前生效，备份 / md5 / job 脚本等内部命令不 source。
 - detach 路径同样支持：`bash -lc` 与 shell_init 在交给远端 job wrapper 之前就拼好；审计与回显仍记用户原话。
 - 离线：`test_connect_refusals.py` 83 例全绿（新增 5 条 bootstrapping 用例），`smoke_stdio` 断言 `exec` schema 含 `login_shell`。
-- 真机 100（`/tmp` 下临时 env.sh，验完清理）：不配 `shell_init` 时 `echo $SSHMCP_PROBE` 得 `empty`，配上后得 `hello`；指向不存在的片段时 `exit_code=97`、stderr 同时有 bash 的缺文件报错与 `[sshmcp] shell_init 失败`、stdout 为空（命令没执行）；`login_shell=true` 下 `echo $0` 得 `bash`。
+- 真机 100（`/tmp` 下临时 env.sh，验完清理）：不配 `shell_init` 时 `echo $SSHMARSHAL_PROBE` 得 `empty`，配上后得 `hello`；指向不存在的片段时 `exit_code=97`、stderr 同时有 bash 的缺文件报错与 `[sshmarshal] shell_init 失败`、stdout 为空（命令没执行）；`login_shell=true` 下 `echo $0` 得 `bash`。
 
 **现状**
 - 每条命令独立执行，conda/venv/export 需要调用方自己拼 `source ... && ...`。
@@ -142,8 +142,8 @@
 - 不引入持久 shell/PTY。
 
 **范围**
-- `ssh_mcp.py`：`exec` 参数、命令包装、MCP schema。
-- `ssh_mcp_hosts.example.json` / `README.md`：字段说明。
+- `ssh_marshal.py`：`exec` 参数、命令包装、MCP schema。
+- `ssh_marshal_hosts.example.json` / `README.md`：字段说明。
 - `test_connect_refusals.py`：命令串形状用例（不连真机）。
 
 **验收**
@@ -178,7 +178,7 @@
 - 每个目标文件都过 `check_write_target`；远端 symlink `lstat` 后拒绝或跳过。
 
 **范围**
-- `ssh_mcp.py`：`put_file`/`get_file` 的目录分支。
+- `ssh_marshal.py`：`put_file`/`get_file` 的目录分支。
 - `ssh_xfer.py`：必要的遍历/续传辅助。
 - `test_ssh_xfer.py` / `test_connect_refusals.py`：目录遍历、软链、逐文件清单校验。
 - `README.md`：递归传输边界。
@@ -209,7 +209,7 @@
 - 凭据文件增加 `critical: true`（永远查清单）、`disabled: true`（临时停用）、可选 `xfer: false`（禁传文件）。
 - `critical` 与 `policy.json` 的 `guarded_hosts` 合并，减少双文件维护。
 
-**范围**：`ssh_mcp.py` 的凭据模型、`list_hosts` 输出、`ssh_guard.applies` 的可选 critical 参数、README、用例。
+**范围**：`ssh_marshal.py` 的凭据模型、`list_hosts` 输出、`ssh_guard.applies` 的可选 critical 参数、README、用例。
 
 **验收**：`disabled` 主机的 `exec` 在建立连接前被拒；`critical` 主机即使非 root 也查清单；`xfer=false` 时 `put_file`/`get_file` 直接拒。
 
@@ -223,16 +223,16 @@
 
 **交付**
 - `hostreg.py`：凭据文件的唯一写入口——读取/校验/原子写/保存前备份（留最近 10 份）/保留 `_` 注释与未知字段/扫描 known_hosts 与 ssh config 出候选。
-- `ssh_probe.py`：指纹探测、私钥加载、一次性连测，从 `ssh_mcp.py` 抽出，GUI 不再反向依赖服务模块；探测仍只做密钥交换、不发凭据。
+- `ssh_probe.py`：指纹探测、私钥加载、一次性连测，从 `ssh_marshal.py` 抽出，GUI 不再反向依赖服务模块；探测仍只做密钥交换、不发凭据。
 - `hosts_gui.py`：tkinter 窗口——列表 + 表单、增改复制删、停用开关、探测指纹并确认、测试连接、从 known_hosts/ssh config 勾选导入；密码留空即不改、不回填明文。
 - `gen_hosts.py`：退成 `hostreg` 的薄壳 CLI（默认只列候选，`--merge` 才写）。
-- `ssh_mcp.py`：只读凭据不变；探测相关函数改为从 `ssh_probe` 引入，`test_connect_refusals` 的 mock 点仍有效。
+- `ssh_marshal.py`：只读凭据不变；探测相关函数改为从 `ssh_probe` 引入，`test_connect_refusals` 的 mock 点仍有效。
 
 **验证**
 - `test_hostreg.py` 18 例全绿（原子写、备份轮转、坏 JSON 拒写、password 留空保留、未知字段保留、扫描与去重）。
 - 原有 95 + 36 例、冒烟测试全绿（抽取后无回归）。
 - `hosts_gui.py --selftest` 能构造窗口并自动关闭；用演示数据实际打开截图核对过布局（标记列、表单、状态栏无裁切）。
-- 真机未做写操作验证：GUI 保存路径由 `test_hostreg.py` 的临时文件用例覆盖，未对真实 `ssh_mcp_hosts.json` 做写测试。
+- 真机未做写操作验证：GUI 保存路径由 `test_hostreg.py` 的临时文件用例覆盖，未对真实 `ssh_marshal_hosts.json` 做写测试。
 
 **边界**
 - GUI 不是 MCP 工具，AI 碰不到凭据文件；服务进程仍然只读。

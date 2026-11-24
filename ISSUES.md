@@ -1,8 +1,8 @@
-# ssh-mcp 待处理问题
+# ssh-marshal 待处理问题
 
 给不在本会话里的 Agent 看的。追加式，新条目往顶部加。每条写清：症状、最小复现、影响面、已排除项、临时规避。
 
-判定口径：凭据/认证/指纹类问题**不要记在这里**，那是用户的事（提醒他改 `ssh_mcp_hosts.json`，该文件不读不写）。这里只收 ssh-mcp 自身的缺陷与已知边界。
+判定口径：凭据/认证/指纹类问题**不要记在这里**，那是用户的事（提醒他改 `ssh_marshal_hosts.json`，该文件不读不写）。这里只收 ssh-marshal 自身的缺陷与已知边界。
 
 纯优化建议（不修也照常好用、修了更顺手的那类）**也不要记在这里**，走 `SUGGESTION.md`，且必须经用户同意才写。判据是「现在会不会咬人」：会咬人的进本文件，不会咬人的进 `SUGGESTION.md`。
 
@@ -11,8 +11,8 @@
 ## 2026-10-14 · `cd ~` 被引号裹成字面量、光一个 `cd` 静默无效果（已修，回归用例钉着）
 
 - **症状**：`exec(host, command="cd ~")` 报 `cd: ~: 没有那个文件或目录`（100 实测，exit 1）。根因：探活串用 `shlex.quote(cd_target)` 把 `~` 裹成 `'~'`，远端 shell 不再展开；`cd ~/xxx` 与 `cwd="~/xxx"` 参数同病。另一处：光一个 `cd`（不带参数）此前不匹配 cd-only 分支，跑完静默无效果。
-- **修法**：新增 `_cd_expr()`（`ssh_mcp.py`），`~` / `~user` 与第一个 `/` 之前的头留在引号外、其余照旧引号保护，前缀与探活两处都换用它；`_cd_only_segment` 接受单 token 的 `cd`，按回 home 处理。
-- **真机复验（100）**：`cd ~` → `cwd_after=/home/user`；`cd ~/no-such-xyz` 报错里是展开后的 `/home/user/no-such-xyz`；带空格目录 `cd '/tmp/sshmcp cd dir'` 记住，下一条 `pwd` 命中。离线 +2 例：`test_cd_expr_keeps_tilde_out_of_the_quotes`、`test_cd_probe_forms`。
+- **修法**：新增 `_cd_expr()`（`ssh_marshal.py`），`~` / `~user` 与第一个 `/` 之前的头留在引号外、其余照旧引号保护，前缀与探活两处都换用它；`_cd_only_segment` 接受单 token 的 `cd`，按回 home 处理。
+- **真机复验（100）**：`cd ~` → `cwd_after=/home/user`；`cd ~/no-such-xyz` 报错里是展开后的 `/home/user/no-such-xyz`；带空格目录 `cd '/tmp/sshmarshal cd dir'` 记住，下一条 `pwd` 命中。离线 +2 例：`test_cd_expr_keeps_tilde_out_of_the_quotes`、`test_cd_probe_forms`。
 - **语义备忘**：只有「单发一条 cd」或 `cwd` 参数改服务端记忆；`cd X && cmd` 复合形态只影响本条（与真 shell 的持久目录不同）。
 
 ## 2026-09-29 · 权限控制解除，只留 killlist（决策记录）
@@ -90,7 +90,7 @@
 另外三条设计约束（都有实测支撑，写在 README）：暂存不能放 `/tmp`（100 的 `/tmp` 是 tmpfs 15.2G，4GB 上限会吃内存）；传输目标必须走 `ssh_guard.check_write_target`（否则 SFTP 是清单的绕过口，缺口已实测）；远端 md5 用 `md5sum` 而不是读回来算（0.12s vs 18s / 200MB）。
 
 4. **提交后又抓到两个命名/作废缺陷**（已修，回归用例钉着）：
-   - `restart=true` 在 `elevate` 路径上是**空操作** —— 它删的是非提权那条 part 名（`<目标>.sshmcp-part`），而提权走 `~/.sshmcp-xfer/<名>.sshmcp-part`，于是 3MB 的旧暂存被当"已传部分"静默复用。修法是让提权路径也调 `X.part_path_for()`（命名只有一处来源），并把删除挪到 part 解析之后。真机分别验了两条分支：默认续传 `resumed_from=7340096` 保留已传片；带 restart `resumed_from=0` 从头传，两者最终 md5 都等于原文。
+   - `restart=true` 在 `elevate` 路径上是**空操作** —— 它删的是非提权那条 part 名（`<目标>.sshmarshal-part`），而提权走 `~/.sshmarshal-xfer/<名>.sshmarshal-part`，于是 3MB 的旧暂存被当"已传部分"静默复用。修法是让提权路径也调 `X.part_path_for()`（命名只有一处来源），并把删除挪到 part 解析之后。真机分别验了两条分支：默认续传 `resumed_from=7340096` 保留已传片；带 restart `resumed_from=0` 从头传，两者最终 md5 都等于原文。
    - part 比新源文件还大（源被重新生成过）时，旧前缀不对应任何有效状态却会被当已传部分 → `push`/`pull` 现在遇到 `base > size` 一律作废从头传。用例：`test_stale_part_larger_than_source_is_discarded`、`test_stale_local_part_larger_than_remote_is_discarded`。
 
 ## 2026-09-29 · 传输没有跨调用取消（P2，按用户决定不做）；目录批量已补

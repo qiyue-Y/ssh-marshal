@@ -21,9 +21,9 @@ import hostreg as R
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="gen_hosts.py", description="从本机 ~/.ssh 生成 ssh-mcp 主机候选（password 留空给人填）")
+    ap = argparse.ArgumentParser(prog="gen_hosts.py", description="从本机 ~/.ssh 生成 ssh-marshal 主机候选（password 留空给人填）")
     ap.add_argument("--merge", action="store_true", help="把可导入的候选并入凭据文件（先备份；JSON 坏了拒跑）")
-    ap.add_argument("--hosts", default="", help="凭据文件路径；默认取 SSHMCP_HOSTS 或脚本目录")
+    ap.add_argument("--hosts", default="", help="凭据文件路径；默认取 SSHMARSHAL_HOSTS 或脚本目录")
     args = ap.parse_args()
 
     for stream in (sys.stdout, sys.stderr):

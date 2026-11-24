@@ -4,7 +4,7 @@
 # ///
 """ssh_probe —— 指纹探测、私钥加载与一次性连测。
 
-从 ssh_mcp.py 抽出来，让主机配置窗口（hosts_gui.py）只依赖 paramiko，
+从 ssh_marshal.py 抽出来，让主机配置窗口（hosts_gui.py）只依赖 paramiko，
 不用为了点一下"探测指纹"去 import 整个 MCP 服务模块。
 
 **探测不发凭据**：probe_hostkey 只走到密钥交换，服务端拿不到用户名与口令。

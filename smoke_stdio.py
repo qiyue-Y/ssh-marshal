@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""stdio 冒烟测试：拉起 ssh_mcp.py，走一遍 initialize / tools/list / list_hosts。
+"""stdio 冒烟测试：拉起 ssh_marshal.py，走一遍 initialize / tools/list / list_hosts。
 
     uv run smoke_stdio.py
 """
@@ -56,8 +56,8 @@ def read_until(proc, want_id: int, timeout: float = 25.0):
 
 
 def main() -> int:
-    # 子进程必须经 uv 起，才能拿到 ssh_mcp.py 的 PEP 723 内联依赖
-    child = ["uv", "run", "--quiet", str(HERE / "ssh_mcp.py"), "serve"]
+    # 子进程必须经 uv 起，才能拿到 ssh_marshal.py 的 PEP 723 内联依赖
+    child = ["uv", "run", "--quiet", str(HERE / "ssh_marshal.py"), "serve"]
     proc = subprocess.Popen(
         child,
         stdin=subprocess.PIPE,
@@ -84,8 +84,8 @@ def main() -> int:
         init = read_until(proc, 1)
         server_info = init.get("result", {}).get("serverInfo", {})
         print(f"initialize {time.monotonic() - t0:.2f}s  server={server_info.get('name')!r}")
-        if server_info.get("name") != "ssh-mcp":
-            failures.append("serverInfo.name 不是 ssh-mcp")
+        if server_info.get("name") != "ssh-marshal":
+            failures.append("serverInfo.name 不是 ssh-marshal")
 
         send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
@@ -94,7 +94,13 @@ def main() -> int:
         tools = read_until(proc, 2).get("result", {}).get("tools", [])
         names = sorted(t["name"] for t in tools)
         print(f"tools/list  {time.monotonic() - t1:.2f}s  -> {names}")
-        for expect in ("audit_tail", "exec", "get_file", "job_kill", "job_list", "job_status",
+        for t in tools:
+            ann = t.get("annotations") or {}
+            missing = [h for h in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+                       if not isinstance(ann.get(h), bool)]
+            if missing:
+                failures.append(f"{t['name']} 缺注解 {', '.join(missing)}")
+        for expect in ("audit_tail", "exec", "get_file", "hosts_gui", "job_kill", "job_list", "job_status",
                        "list_hosts", "pin_hostkey", "put_file", "read_output", "session_reset", "xfer_stat"):
             if expect not in names:
                 failures.append(f"缺工具 {expect}")
@@ -108,6 +114,8 @@ def main() -> int:
                 failures.append(f"job_status 缺 {p} 参数")
         if "brief" not in schemas.get("list_hosts", {}):
             failures.append("list_hosts 缺 brief 参数")
+        if "action" not in schemas.get("hosts_gui", {}):
+            failures.append("hosts_gui 缺 action 参数")
         if "trust" not in schemas.get("pin_hostkey", {}):
             failures.append("pin_hostkey 缺 trust 参数")
         if "only_risky" not in schemas.get("audit_tail", {}):
@@ -141,6 +149,25 @@ def main() -> int:
                 )
             if "rw_allowed" in text or "effective_mode" in text:
                 failures.append("list_hosts 还在输出已废弃的权限字段")
+
+        send(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "hosts_gui", "arguments": {"action": "status"}}})
+        res = read_until(proc, 4).get("result", {})
+        text = "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            failures.append(f"hosts_gui 返回不是 JSON：{text[:200]}")
+        else:
+            print(f"hosts_gui(status) -> running={payload.get('running')} hosts={len(payload.get('hosts') or [])}")
+            for key in ("ok", "running", "file", "hosts"):
+                if key not in payload:
+                    failures.append(f"hosts_gui 返回缺 {key}")
+            if payload.get("launched"):
+                failures.append("action=status 不该拉起窗口")
+            leaked = find_secret_fields(payload)
+            if leaked:
+                failures.append(f"hosts_gui 输出了密钥字段：{', '.join(leaked)}")
     finally:
         proc.stdin.close()
         proc.terminate()
