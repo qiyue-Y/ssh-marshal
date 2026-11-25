@@ -266,7 +266,7 @@ class App:
             self.set_status("先在左边选一台再删除")
             return
         alias = picked[0]
-        if not messagebox.askyesno("确认删除", f"从清单里删除 {alias}？\n（保存后生效，会先自动备份原文件）"):
+        if not messagebox.askyesno("确认删除", f"从清单里删除 {alias}？\n（保存后生效，不再生成备份）"):
             return
         self.reg.remove(alias)
         self._persist(f"已删除 {alias}")
@@ -305,13 +305,12 @@ class App:
 
     def _persist(self, message: str, select: str | None = None) -> None:
         try:
-            backup = self.reg.save()
+            self.reg.save()
         except (R.HostregError, OSError) as exc:
             self.set_status(f"保存失败：{exc}", error=True)
             return
         self.refresh_list(select)
-        suffix = f"，原文件备份为 {backup}" if backup else ""
-        self.set_status(message + suffix)
+        self.set_status(message)
         if select:
             self._fill_form(select, self.reg.get(select))
 
@@ -467,7 +466,7 @@ def main(argv: list[str]) -> int:
     if selftest:
         root.after(500, root.destroy)
     else:
-        app.set_status(f"清单文件：{app.reg.path}（保存前会自动备份）")
+        app.set_status(f"清单文件：{app.reg.path}（保存直接写入，不生成备份）")
     root.mainloop()
     del mutex
     return 0

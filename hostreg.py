@@ -3,15 +3,15 @@
 # ///
 """hostreg —— 主机清单的读写与校验，凭据文件只有这一个写入口。
 
-供两个调用方共用：
+供三个调用方共用：
   - `hosts_gui.py`（tkinter 窗口，用户本人跑）
+  - `hosts_web.py`（本地 Web 界面，用户本人跑）
   - `gen_hosts.py`（命令行薄壳）
 
 设计约束：
   - **纯 stdlib**，不 import paramiko / mcp，方便离线测。
   - 保存是原子的：先写同目录临时文件再 `os.replace`，服务端按 mtime 热加载，
-    不会读到半截 JSON。
-  - 保存前自动备份成 `<文件名>.bak-<时间戳>`，只留最近若干份。
+    不会读到半截 JSON；保存不生成备份。
   - `_` 开头的注释键原样保留；条目里服务端不认识的键也原样保留（GUI 只改它认识的字段）。
   - password 留空 = 沿用旧口令（GUI 不回填明文，避免出现在截图里）。
 
@@ -27,7 +27,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -37,7 +36,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_NAME = "ssh_marshal_hosts.json"
-BACKUP_KEEP = 10
 SKIP_HOSTS = {"github.com"}  # 没有 shell 可 exec 的目标
 
 # 服务端 HostCred 认识的字段；GUI 表单按这张表生成
@@ -203,34 +201,11 @@ class Registry:
     def get(self, alias: str) -> dict:
         return dict(self.entries().get(alias) or {})
 
-    def _backup(self) -> str:
-        """保存前备份旧文件，返回备份文件名（没有旧文件时为空）。"""
-        if not self.path.exists():
-            return ""
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        dest = self.path.with_name(f"{self.path.name}.bak-{stamp}")
-        n = 1
-        while dest.exists():
-            dest = self.path.with_name(f"{self.path.name}.bak-{stamp}-{n}")
-            n += 1
-        shutil.copy2(self.path, dest)
-        self._prune_backups()
-        return dest.name
-
-    def _prune_backups(self) -> None:
-        baks = sorted(self.path.parent.glob(f"{self.path.name}.bak-*"), key=lambda p: p.name)
-        for old in baks[:-BACKUP_KEEP]:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-
-    def save(self) -> str:
-        """原子写 + 备份。返回备份文件名；失败抛 HostregError/OSError。"""
+    def save(self) -> None:
+        """原子写，不生成备份；失败抛 HostregError/OSError。"""
         if not self.writable:
             raise HostregError(self.error)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        backup = self._backup()
         tmp = self.path.with_name(f"{self.path.name}.tmp")
         payload = json.dumps(self.raw, indent=2, ensure_ascii=False) + "\n"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -238,7 +213,6 @@ class Registry:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, self.path)
-        return backup
 
     def upsert(self, alias: str, entry: dict, keep_password_if_empty: bool = True) -> dict:
         """新增或更新一条；保留旧条目里的未知键，password 留空时沿用旧口令。
@@ -474,7 +448,7 @@ def launch_gui(path: Path | None = None) -> dict:
 
 
 def file_digest(path: Path) -> dict:
-    """内容哈希，用来判断「用户改过没有」；不看 mtime，备份与临时写不会误报。"""
+    """内容哈希，用来判断「用户改过没有」；不看 mtime，临时写不会误报。"""
     try:
         data = path.read_bytes()
         mtime = path.stat().st_mtime

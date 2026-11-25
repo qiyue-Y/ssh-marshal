@@ -8,7 +8,7 @@
 
 用法：
     uv run gen_hosts.py            # 只列出候选，不写任何文件
-    uv run gen_hosts.py --merge    # 把可导入的候选并入凭据文件（先自动备份）
+    uv run gen_hosts.py --merge    # 把可导入的候选并入凭据文件（不生成备份）
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import hostreg as R
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="gen_hosts.py", description="从本机 ~/.ssh 生成 ssh-marshal 主机候选（password 留空给人填）")
-    ap.add_argument("--merge", action="store_true", help="把可导入的候选并入凭据文件（先备份；JSON 坏了拒跑）")
+    ap.add_argument("--merge", action="store_true", help="把可导入的候选并入凭据文件（JSON 坏了拒跑；不生成备份）")
     ap.add_argument("--hosts", default="", help="凭据文件路径；默认取 SSHMARSHAL_HOSTS 或脚本目录")
     args = ap.parse_args()
 
@@ -68,9 +68,10 @@ def main() -> int:
     for cand in importable:
         reg.upsert(cand.alias, cand.entry, keep_password_if_empty=False)
         added.append(cand.alias)
-    backup = reg.save()
+    existed = reg.path.exists()
+    reg.save()
     print(f"\n已并入 {len(added)} 台：{'、'.join(added)}")
-    print(f"原文件备份为 {backup}。" if backup else "（原来没有凭据文件，本次新建）")
+    print("已写入清单文件（未生成备份）。" if existed else "已新建凭据文件（未生成备份）。")
     print("接着补 password（username 为空的那几台也要补），或用界面逐台编辑。")
     return 0
 

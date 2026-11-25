@@ -75,7 +75,7 @@ class Validation(unittest.TestCase):
         self.assertTrue(any("key_path" in w for w in warnings))
 
 
-class SaveAndBackup(unittest.TestCase):
+class Save(unittest.TestCase):
     def setUp(self):
         self.dir = tmpdir()
         self.path = self.dir / "hosts.json"
@@ -84,12 +84,12 @@ class SaveAndBackup(unittest.TestCase):
         self.path.write_text(json.dumps({"_说明": "手工注释", "100": entry()}, ensure_ascii=False), encoding="utf-8")
         reg = R.Registry(self.path)
         reg.upsert("66", entry(address="10.0.0.66"))
-        backup = reg.save()
+        reg.save()
         data = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(data["_说明"], "手工注释")
         self.assertEqual(data["100"]["address"], "10.0.0.10")
         self.assertEqual(data["66"]["address"], "10.0.0.66")
-        self.assertTrue(backup.startswith("hosts.json.bak-"))
+        self.assertEqual(list(self.dir.glob("hosts.json.bak-*")), [])
         self.assertFalse((self.dir / "hosts.json.tmp").exists(), "临时文件不能留下")
 
     def test_unknown_fields_survive_update(self):
@@ -116,15 +116,6 @@ class SaveAndBackup(unittest.TestCase):
         reg.upsert("100", entry(password="new"))
         reg.save()
         self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["100"]["password"], "new")
-
-    def test_backups_are_pruned(self):
-        self.path.write_text(json.dumps({"100": entry()}), encoding="utf-8")
-        for n in range(R.BACKUP_KEEP + 4):
-            reg = R.Registry(self.path)
-            reg.upsert("100", entry(username=f"u{n}"))
-            reg.save()
-        baks = list(self.dir.glob("hosts.json.bak-*"))
-        self.assertLessEqual(len(baks), R.BACKUP_KEEP)
 
     def test_remove_and_flag(self):
         self.path.write_text(json.dumps({"100": entry()}), encoding="utf-8")

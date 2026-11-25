@@ -29,6 +29,7 @@
 ```powershell
 uv run --quiet ssh_marshal.py doctor   # 1. 自检配置、凭据、依赖与目录
 uv run hosts_gui.py                # 2. 图形界面配置主机（或手工填 ssh_marshal_hosts.example.json）
+uv run hosts_web.py                # 3. 浏览器界面（试用，仅 127.0.0.1）
 ```
 
 ```jsonc
@@ -80,7 +81,7 @@ uv run --quiet ssh_marshal.py doctor
 python test_ssh_guard.py
 ```
 
-主机清单读写的离线用例（原子写、备份轮转、字段校验、保留注释键、扫描导入）：
+主机清单读写的离线用例（原子写、字段校验、保留注释键、扫描导入）：
 
 ```powershell
 python test_hostreg.py
@@ -112,7 +113,7 @@ uv run --quiet smoke_stdio.py
 
 ## 配
 
-1. `copy ssh_marshal_hosts.example.json ssh_marshal_hosts.json`，填真实凭据；或者直接用界面维护：`uv run hosts_gui.py`。**凭据文件对服务端只读**：AI 与运行中的服务都不会写它，写只发生在你运行 GUI / `gen_hosts.py --merge` 时。
+1. `copy ssh_marshal_hosts.example.json ssh_marshal_hosts.json`，填真实凭据；或者直接用界面维护：`uv run hosts_gui.py` / `uv run hosts_web.py`。**凭据文件对服务端只读**：AI 与运行中的服务都不会写它，写只发生在你运行 GUI / Web 界面 / `gen_hosts.py --merge` 时。
    可用字段：`address` `port` `username` `auth`（`password`/`key`）`password` `key_path` `hostKey` `purpose`，提权三项 `elevate` `elevate_user` `elevate_password`（见「提权」节），环境初始化字段 `shell_init`（见「环境初始化」节），以及能力位 `disabled` `critical` `xfer`（见下一条）。
    旧字段 `rw_allowed` 已从模型里删掉；凭据文件里残留它会被静默忽略，不用你去清理（有用例钉着这个兼容行为）。
    `auth: "key"` 时 `key_path` 可省略，缺省按 `~/.ssh/{id_ed25519,id_rsa,id_ecdsa,id_dsa}` 顺序找。**带 passphrase 的文件私钥不支持**，此时改为问 ssh-agent 并取它的第一把 key（只取一把：逐把试认证会连着打远端的失败次数）。Windows 的 `ssh-agent` 服务默认是 Stopped/Disabled，要先 `Set-Service ssh-agent -StartupType Manual` 起服务再 `ssh-add`。
@@ -155,7 +156,7 @@ uv run hosts_gui.py
 
 tkinter 窗口，专门维护主机清单——**不经过 MCP，AI 碰不到**（凭据文件仍然只有你能改）：
 
-- 左侧列表 + 右侧表单，增 / 改 / 复制 / 删除 / 停用主机；保存前自动备份 `<文件名>.bak-<时间戳>`（留最近 10 份），写入是原子的（临时文件 + `os.replace`），正在跑的服务不会读到半截 JSON。
+- 左侧列表 + 右侧表单，增 / 改 / 复制 / 删除 / 停用主机；保存直接原子写入（临时文件 + `os.replace`），不生成 `.bak-*` 备份；正在跑的服务不会读到半截 JSON。
 - **密码框留空＝沿用原口令**，打开时不回填明文；只有填了才覆盖。
 - **探测指纹**：只做密钥交换、不发送任何凭据，显示出指纹让你核对，确认后填入 `hostKey`，点保存才落盘。与已钉指纹不符时拒绝覆盖。
 - **测试连接**：只跑固定探针（`/etc/os-release` 前两行 + `uname -m`），不是第二个终端。
@@ -166,8 +167,24 @@ tkinter 窗口，专门维护主机清单——**不经过 MCP，AI 碰不到**�
 
 ```powershell
 uv run gen_hosts.py            # 只列出候选，不写文件
-uv run gen_hosts.py --merge    # 把可导入的候选并入清单（先备份）
+uv run gen_hosts.py --merge    # 把可导入的候选并入清单
 ```
+
+## Web 界面（hosts_web.py，试用）
+
+```powershell
+uv run hosts_web.py              # 启动本地服务并打开浏览器
+uv run hosts_web.py --no-open    # 只启动，打印带 token 的地址
+```
+
+同一份主机清单的浏览器界面，和 tkinter 版共用 `hostreg.py` 的原子写与校验；保存不生成备份：
+
+- 只监听 `127.0.0.1`，启动时生成随机 token；地址里的 `#token=…` 只用于本次页面，口令不会回填到页面。
+- 左侧主机列表 + 右侧编辑表单，支持新增、复制式改配置、删除、停用、能力位、探测指纹、测试连接、从 `~/.ssh` 导入。
+- 探测只走密钥交换、不发凭据；结果直接填入 `hostKey` 输入框，与已固定指纹不符时在结果区提示，保存前可核对。
+- 保存、删除、导入都直接写清单，不生成 `.bak-*` 文件。
+- 页面右上角「关闭服务」或终端 `Ctrl+C` 结束。它同样不是 MCP 工具，AI 碰不到。
+- 前端资源在 `web/`，字体已本地化，不依赖外网 CDN；tkinter 版 `hosts_gui.py` 保留。
 
 ## 提权（elevate）
 
