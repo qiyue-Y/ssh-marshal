@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +116,20 @@ class Save(unittest.TestCase):
         reg.save()
         self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["100"]["password"], "new")
 
+    def test_rename_moves_entry_and_keeps_password(self):
+        self.path.write_text(
+            json.dumps({"old": {**entry(password="old-secret"), "future_field": "keep-me"}}),
+            encoding="utf-8",
+        )
+        reg = R.Registry(self.path)
+        reg.rename("old", "new", entry(password="", username="ops"))
+        reg.save()
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertNotIn("old", data, "旧键必须消失，不能变成两条")
+        self.assertEqual(data["new"]["username"], "ops")
+        self.assertEqual(data["new"]["password"], "old-secret", "改名后口令沿用")
+        self.assertEqual(data["new"]["future_field"], "keep-me", "未知键跟着条目走")
+
     def test_remove_and_flag(self):
         self.path.write_text(json.dumps({"100": entry()}), encoding="utf-8")
         reg = R.Registry(self.path)
@@ -194,7 +207,7 @@ class Scan(unittest.TestCase):
         self.assertTrue(cands[0].importable, "缺指纹只是提醒，可以导入后再探测")
 
 
-class GuiLaunch(unittest.TestCase):
+class WebUi(unittest.TestCase):
     def test_file_digest_follows_content(self):
         path = tmpdir() / "hosts.json"
         self.assertEqual(R.file_digest(path),
@@ -207,15 +220,21 @@ class GuiLaunch(unittest.TestCase):
         path.write_text('{"a": {}, "b": {}}', encoding="utf-8")
         self.assertNotEqual(first["sha256"], R.file_digest(path)["sha256"])
 
-    def test_mutex_name_is_per_credentials_file(self):
-        one = R._gui_mutex_name(Path("a") / "hosts.json")
-        self.assertTrue(one.startswith("Local\\sshmarshal-hosts-gui-"))
-        self.assertEqual(one, R._gui_mutex_name(Path("a") / "hosts.json"))
-        self.assertNotEqual(one, R._gui_mutex_name(Path("b") / "hosts.json"))
+    def test_web_ui_status_roundtrip(self):
+        path = tmpdir() / "hosts.json"
+        dest = R.write_web_ui_status(path, 54001, "control-token")
+        try:
+            self.assertTrue(dest.exists())
+            data = R.read_web_ui_status(path)
+            self.assertEqual(data["port"], 54001)
+            self.assertEqual(data["control"], "control-token")
+            self.assertEqual(data["hosts"], str(path.resolve()))
+        finally:
+            R.clear_web_ui_status(path)
+        self.assertFalse(dest.exists())
 
-    @unittest.skipUnless(os.name == "nt", "互斥体判活只有 Windows 实现")
-    def test_gui_running_false_without_window(self):
-        self.assertFalse(R.gui_running(tmpdir() / "hosts.json"))
+    def test_web_ui_running_false_without_status(self):
+        self.assertFalse(R.web_ui_running(tmpdir() / "hosts.json")["running"])
 
 
 if __name__ == "__main__":

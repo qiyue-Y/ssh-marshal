@@ -51,8 +51,8 @@ import ssh_guard as G  # noqa: E402
 import ssh_jobs as J  # noqa: E402
 import ssh_xfer as X  # noqa: E402
 import output_store as OS  # noqa: E402
-import hostreg as H  # noqa: E402 - 只用来拉起/判活 GUI，服务本身不读写凭据文件
-from ssh_probe import (  # noqa: E402 - 探测/私钥逻辑与 GUI 共用，见 ssh_probe.py
+import hostreg as H  # noqa: E402 - 只用来拉起/判活 Web 界面，服务本身不读写凭据文件
+from ssh_probe import (  # noqa: E402 - 探测/私钥逻辑与 Web 界面共用，见 ssh_probe.py
     HostKeyMismatch,
     build_pinned_policy as _build_pinned_policy,
     load_private_key as _load_private_key,
@@ -174,7 +174,7 @@ class HostCred:
     # 每条命令前 source 的初始化片段（如 conda 激活）。空表示不 source；
     # 失败时命令不执行并返回 exit 97，不会和用户命令的退出码混在一起。
     shell_init: str = ""
-    # 能力位（用户维护，见 hosts_gui.py）：
+    # 能力位（用户维护，见主机清单 Web 界面 hosts_web.py）：
     #   disabled  临时停用这台，建连前就拒，不删凭据
     #   critical  永远查 killlist，等价于把别名写进 policy.json 的 guarded_hosts
     #   xfer      false 表示只执行、禁止传文件
@@ -925,7 +925,7 @@ def _preflight(alias: str, command: str) -> tuple[dict | None, HostCred | None, 
     if cred.disabled:
         return (
             _block(alias, command, "host_disabled", "disabled",
-                   f"{alias} 在凭据文件里标了 disabled:true；要恢复就在 hosts_gui.py 里取消停用"),
+                   f"{alias} 在凭据文件里标了 disabled:true；要恢复就在主机清单 Web 界面里取消停用"),
             None,
             "",
         )
@@ -1218,29 +1218,39 @@ def _tool_list_hosts(brief: bool = False) -> dict:
 
 
 def _tool_hosts_gui(action: str = "open") -> dict:
-    """打开主机配置窗口；status 只查状态。窗口里的保存走 hostreg 的原子写与自动备份。"""
+    """打开/复用主机清单 Web 界面；status 只查服务与文件状态。保存走 hostreg 的原子写，不生成备份。"""
     if action not in ("open", "status"):
         return {"ok": False, "error": 'action 只能是 "open" 或 "status"'}
-    running = H.gui_running(HOSTS_PATH)
+    status = H.web_ui_running(HOSTS_PATH)
+    running = bool(status.get("running"))
     launched = False
-    pid = None
-    if action == "open" and not running:
-        result = H.launch_gui(HOSTS_PATH)
-        if not result.get("ok"):
-            return {"ok": False, **result}
-        launched = not result.get("reused")
-        running = bool(result.get("running"))
-        pid = result.get("pid")
-    return {
+    opened = False
+    pid = status.get("pid")
+    if action == "open":
+        if running:
+            opened = H.reopen_web_ui(HOSTS_PATH)
+        else:
+            result = H.launch_web_ui(HOSTS_PATH)
+            if not result.get("ok"):
+                return {"ok": False, **result}
+            launched = not result.get("reused")
+            running = bool(result.get("running"))
+            opened = bool(result.get("opened"))
+            pid = result.get("pid")
+    out = {
         "ok": True,
         "action": action,
         "path": str(HOSTS_PATH),
         "running": running,
         "launched": launched,
+        "opened": opened,
         "pid": pid,
         "file": H.file_digest(HOSTS_PATH),
         "hosts": sorted(HOSTS.get()),
     }
+    if action == "open" and running and not opened:
+        out["hint"] = "Web 服务已在运行，但重新打开页面失败；请在浏览器里使用原页面，或先关闭服务再打开。"
+    return out
 
 
 def _tool_exec(host: str, command: str, cwd: str | None = None, idle_timeout: float | None = None, max_duration: float | None = None, force: bool = False, elevate: bool = False, detach: bool = False, force_reason: str = "", login_shell: bool = False) -> dict:
@@ -1321,7 +1331,7 @@ def _tool_put_file(host: str, local: str, remote: str, overwrite: bool = False, 
         return _block(host, f"<put> {remote}", "elevate_not_configured", "no_elevate", f"凭据文件里为 {host} 打开 elevate")
     if not cred.xfer:
         return _block(host, f"<put> {remote}", "xfer_disabled", "xfer_disabled",
-                      f"{host} 在凭据文件里标了 xfer:false（只执行、不传文件）；要传就在 hosts_gui.py 里勾回")
+                      f"{host} 在凭据文件里标了 xfer:false（只执行、不传文件）；要传就在主机清单 Web 界面里勾回")
     blocked = _transfer_guard(cred, host, remote, elevate, force)
     if blocked is not None:
         return blocked
@@ -1459,7 +1469,7 @@ def _tool_get_file(host: str, remote: str, local: str = "", overwrite: bool = Fa
         return _block(host, f"<get> {remote}", "elevate_not_configured", "no_elevate", f"凭据文件里为 {host} 打开 elevate")
     if not cred.xfer:
         return _block(host, f"<get> {remote}", "xfer_disabled", "xfer_disabled",
-                      f"{host} 在凭据文件里标了 xfer:false（只执行、不传文件）；要传就在 hosts_gui.py 里勾回")
+                      f"{host} 在凭据文件里标了 xfer:false（只执行、不传文件）；要传就在主机清单 Web 界面里勾回")
     if recursive and elevate:
         return _block(host, f"<get> {remote}", "elevate_recursive_unsupported", "no_elevate_recursive",
                       "目录传输 v1 不支持 elevate：先在远端 tar 打包再下单个文件")
@@ -2101,7 +2111,7 @@ def build_server():
         "ssh-marshal",
         instructions=(
             "用户说想新增/修改/停用服务器，或工具返回 credential_missing / host_key_unpinned 时，"
-            "先调用 hosts_gui(action=\"open\") 打开主机配置窗口，把窗口交给用户操作，不要替用户填表或保存；"
+            "先调用 hosts_gui(action=\"open\") 打开主机清单 Web 界面（浏览器），把页面交给用户操作，不要替用户填表或保存；"
             "用户明确说配置完成后，再调用 hosts_gui(action=\"status\") 比对 file.sha256 与 hosts（或直接 list_hosts）"
             "确认改动，然后继续下一步（如 pin_hostkey、试连）。不要读写凭据文件。"
         ),
@@ -2115,12 +2125,12 @@ def build_server():
     @server.tool(
         name="hosts_gui",
         description=(
-            "打开主机清单图形界面（tkinter 窗口），用户在窗口里增删改服务器、探测指纹、测试连接。"
+            "打开/复用主机清单 Web 界面（浏览器，工具名沿用 hosts_gui），用户在页面里增删改服务器、探测指纹、测试连接。"
             "用户说「想加一台服务器 / 改某台主机配置 / 换口令」，或工具返回 credential_missing / host_key_unpinned 时调用。"
-            "action=open：窗口已开着就复用，否则以 detached 方式拉起（服务重启不会带走窗口），等窗口建好再返回；"
-            "返回 running、file.sha256 与现有 hosts。随后把窗口交给用户操作，不要替用户填表或保存；"
+            "action=open：已有服务就复用并重新打开页面，否则以 detached 方式拉起服务并等它就绪；"
+            "返回 running、launched、opened、pid、file.sha256 与现有 hosts。随后把页面交给用户操作，不要替用户填表或保存；"
             "用户明确说配置完成后，再调 action=status 比对 file.sha256 与 hosts，或用 list_hosts 确认新主机，再继续下一步。"
-            "action=status：只查窗口是否还开着、文件是否变过，不拉新窗口。返回不含任何密码。"
+            "action=status：只查服务是否在运行、文件是否变过，不拉起服务。返回不含任何密码。"
         ),
         annotations=_hints(False, False, True, False),
     )

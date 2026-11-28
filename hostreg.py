@@ -3,10 +3,10 @@
 # ///
 """hostreg —— 主机清单的读写与校验，凭据文件只有这一个写入口。
 
-供三个调用方共用：
-  - `hosts_gui.py`（tkinter 窗口，用户本人跑）
+供这些调用方共用：
   - `hosts_web.py`（本地 Web 界面，用户本人跑）
   - `gen_hosts.py`（命令行薄壳）
+  - `ssh_marshal.py`（只调用 Web 界面的拉起/判活，不读写凭据）
 
 设计约束：
   - **纯 stdlib**，不 import paramiko / mcp，方便离线测。
@@ -21,15 +21,15 @@
 from __future__ import annotations
 
 import base64
-import ctypes
 import hashlib
-import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -228,6 +228,11 @@ class Registry:
         self.raw[alias] = merged
         return merged
 
+    def rename(self, old: str, new: str, entry: dict, keep_password_if_empty: bool = True) -> dict:
+        """把 old 整条挪到 new；未知键与「口令留空＝沿用」语义和 upsert 一致。"""
+        self.raw[new] = self.raw.pop(old)
+        return self.upsert(new, entry, keep_password_if_empty=keep_password_if_empty)
+
     def remove(self, alias: str) -> bool:
         if alias in self.entries():
             self.raw.pop(alias, None)
@@ -370,81 +375,146 @@ def build_candidates(raw: dict, connected: dict[tuple[str, int], dict[str, str]]
 
 
 # --------------------------------------------------------------------------------------
-# 配置窗口的拉起与判活（给 ssh_marshal.py 的 hosts_gui 工具用）
+# Web 界面（hosts_web.py）的拉起与判活（给 ssh_marshal.py 的 hosts_gui 工具用）
 #
-# 拉起是 detached 的：窗口的父进程是 MCP 服务，但服务重启不会把它带走。
-# 判活用命名互斥体而不是 pid 文件：进程一退出内核就释放，不会留下假活的陈旧 pid。
+# 服务拉起是 detached 的；一个凭据文件同时只认一个 Web 服务。
+# 判活靠临时状态文件里的端口 + /api/health，不靠进程名或窗口句柄。
 # --------------------------------------------------------------------------------------
 
-
-def gui_script() -> Path:
-    return HERE / "hosts_gui.py"
-
-
-def _gui_mutex_name(path: Path) -> str:
-    key = hashlib.sha1(str(path.expanduser().resolve()).lower().encode("utf-8")).hexdigest()[:12]
-    return f"Local\\sshmarshal-hosts-gui-{key}"
+WEB_STATUS_DIR = Path(tempfile.gettempdir()) / "sshmarshal-web"
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def hold_gui_mutex(path: Path | None = None):
-    """窗口进程活着期间占住互斥体；返回值要一直握到窗口关闭。非 Windows 返回 None。"""
-    if os.name != "nt":
-        return None
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW.restype = ctypes.c_void_p
-    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-    return kernel32.CreateMutexW(None, False, _gui_mutex_name(path or hosts_path()))
+def web_ui_script() -> Path:
+    return HERE / "hosts_web.py"
 
 
-def gui_running(path: Path | None = None) -> bool:
-    """这个凭据文件对应的配置窗口是否还活着。非 Windows 一律当作没开。"""
-    if os.name != "nt":
+def web_ui_status_path(path: Path | None = None) -> Path:
+    target = Path(path or hosts_path()).expanduser().resolve()
+    key = hashlib.sha1(str(target).lower().encode("utf-8")).hexdigest()[:16]
+    return WEB_STATUS_DIR / f"{key}.json"
+
+
+def write_web_ui_status(path: Path, port: int, control: str, opened: bool | None = None) -> Path:
+    dest = web_ui_status_path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "port": int(port),
+        "hosts": str(Path(path).expanduser().resolve()),
+        "control": control,
+        "opened": opened,
+        "started": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, dest)
+    return dest
+
+
+def clear_web_ui_status(path: Path) -> None:
+    dest = web_ui_status_path(path)
+    try:
+        data = json.loads(dest.read_text(encoding="utf-8"))
+        if int(data.get("pid") or 0) == os.getpid():
+            dest.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def read_web_ui_status(path: Path | None = None) -> dict:
+    try:
+        data = json.loads(web_ui_status_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def web_ui_running(path: Path | None = None, timeout: float = 0.7) -> dict:
+    """返回 {running, pid, port, control}；control 只给启动器内部用，不对外输出。"""
+    target = Path(path or hosts_path()).expanduser().resolve()
+    status = read_web_ui_status(target)
+    port = status.get("port")
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        return {"running": False, "pid": status.get("pid"), "port": None, "control": ""}
+    try:
+        with _LOCAL_OPENER.open(f"http://127.0.0.1:{port}/api/health", timeout=timeout) as resp:
+            payload = json.loads(resp.read(512).decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - 服务没起来/端口被占都按未运行处理
+        return {"running": False, "pid": status.get("pid"), "port": port, "control": ""}
+    running = bool(payload.get("ok")) and str(payload.get("hosts") or "").lower() == str(target).lower()
+    return {
+        "running": running,
+        "pid": payload.get("pid") or status.get("pid"),
+        "port": port,
+        "control": status.get("control") or "",
+    }
+
+
+def reopen_web_ui(path: Path | None = None) -> bool:
+    """让已运行的 Web 服务再打开一个浏览器页面；control 只在本机状态文件里。"""
+    status = web_ui_running(path)
+    control = status.get("control") or ""
+    if not status.get("running") or not control:
         return False
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenMutexW.restype = ctypes.c_void_p
-    kernel32.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_wchar_p]
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    handle = kernel32.OpenMutexW(0x00100000, False, _gui_mutex_name(path or hosts_path()))  # SYNCHRONIZE
-    if not handle:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{status['port']}/api/reopen",
+        data=b"{}", method="POST",
+        headers={"X-Control": control, "Content-Type": "application/json"},
+    )
+    try:
+        with _LOCAL_OPENER.open(req, timeout=2.0) as resp:
+            payload = json.loads(resp.read(512).decode("utf-8", "replace"))
+            return bool(payload.get("ok")) and bool(payload.get("opened", False))
+    except Exception:  # noqa: BLE001
         return False
-    kernel32.CloseHandle(handle)
-    return True
 
 
-def launch_gui(path: Path | None = None) -> dict:
-    """detached 拉起 hosts_gui.py，并等它把窗口建起来（最多 5 秒）再回报是否活着。"""
+def launch_web_ui(path: Path | None = None) -> dict:
+    """detached 拉起 hosts_web.py；已有服务则复用它并重新打开页面。"""
     target = Path(path or hosts_path()).expanduser()
-    if gui_running(target):
-        return {"ok": True, "running": True, "pid": None, "reused": True}
-    script = gui_script()
+    status = web_ui_running(target)
+    if status["running"]:
+        return {
+            "ok": True, "running": True, "reused": True,
+            "pid": status.get("pid"), "port": status.get("port"),
+            "opened": reopen_web_ui(target),
+        }
+    script = web_ui_script()
     if not script.exists():
         return {"ok": False, "reason": "script_missing", "hint": f"找不到 {script}"}
-    if importlib.util.find_spec("tkinter") is None:
-        return {"ok": False, "reason": "tkinter_unavailable",
-                "hint": "当前 Python 没有 tkinter，请用 uv run hosts_gui.py 手动打开"}
     env = dict(os.environ)
-    env["SSHMARSHAL_HOSTS"] = str(target)  # 窗口必须编辑服务正在读的那份清单
-    args = [sys.executable, str(script)]
+    env["SSHMARSHAL_HOSTS"] = str(target)  # 页面必须编辑服务正在读的那份清单
+    args = [sys.executable, str(script), "--port", "0"]
     kwargs = dict(cwd=str(HERE), env=env, stdin=subprocess.DEVNULL,
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
     if os.name == "nt":
         base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         try:
-            # 连同 Job 一起脱出，否则客户端重启/命令结束时窗口会被回收
+            # 连同 Job 一起脱出，否则客户端重启/命令结束时服务会被回收
             proc = subprocess.Popen(args, creationflags=base | 0x01000000, **kwargs)  # CREATE_BREAKAWAY_FROM_JOB
         except OSError:
             proc = subprocess.Popen(args, creationflags=base, **kwargs)
     else:
         proc = subprocess.Popen(args, **kwargs)
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if gui_running(target):
-            return {"ok": True, "pid": proc.pid, "running": True}
-        if proc.poll() is not None:  # 起不来（缺 tkinter、脚本报错）时别谎报已打开
-            return {"ok": False, "reason": "exited", "pid": proc.pid,
-                    "exit_code": proc.returncode, "hint": "窗口进程立刻退出了，请用 uv run hosts_gui.py 看报错"}
+        check = web_ui_running(target)
+        if check["running"]:
+            current = read_web_ui_status(target)
+            return {"ok": True, "running": True, "reused": False,
+                    "pid": check.get("pid") or proc.pid, "port": check.get("port"),
+                    "opened": bool(current.get("opened"))}
+        if proc.poll() is not None:
+            return {"ok": False, "reason": "exited", "pid": proc.pid, "exit_code": proc.returncode,
+                    "hint": "Web 服务立刻退出了，请用 uv run hosts_web.py 看报错"}
         time.sleep(0.1)
-    return {"ok": True, "pid": proc.pid, "running": gui_running(target)}
+    return {"ok": False, "reason": "timeout", "pid": proc.pid,
+            "hint": "Web 服务启动超时；可稍后重试，或直接用 uv run hosts_web.py 打开"}
 
 
 def file_digest(path: Path) -> dict:

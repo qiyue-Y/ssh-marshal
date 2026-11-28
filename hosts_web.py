@@ -32,6 +32,7 @@ import ssh_probe as P
 HERE = Path(__file__).resolve().parent
 WEB_ROOT = (HERE / "web").resolve()
 TOKEN = secrets.token_urlsafe(24)
+CONTROL = secrets.token_urlsafe(24)
 WRITE_LOCK = threading.Lock()
 MAX_BODY = 1_000_000
 
@@ -42,6 +43,34 @@ class ApiError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status = status
+
+
+def _aux_path(env: str, name: str) -> Path:
+    """定位 policy.json / hostkeys.json：和服务端用同一套环境变量。"""
+    if raw := os.environ.get(env):
+        return Path(raw).expanduser()
+    base = Path(os.environ["SSHMARSHAL_HOME"]).expanduser() if os.environ.get("SSHMARSHAL_HOME") else HERE
+    return base / name
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def rename_notes(old: str, new: str) -> list[str]:
+    """改名后仍指向旧别名的外部引用；这两份文件不归本页面写，只能提示。"""
+    notes: list[str] = []
+    guarded = _read_json(_aux_path("SSHMARSHAL_POLICY", "policy.json")).get("guarded_hosts") or []
+    if old in guarded:
+        notes.append(f"policy.json 的 guarded_hosts 仍写着旧别名 {old}，保护已不覆盖 {new}；要保留请自行改配置")
+    pins = _read_json(_aux_path("SSHMARSHAL_HOSTKEYS", "hostkeys.json"))
+    if old in pins and new not in pins:
+        notes.append(f"hostkeys.json 里旧别名 {old} 的指纹不会跟着改名，清单里没钉 hostKey 的主机会提示 host_key_unpinned")
+    return notes
 
 
 def public_entry(entry: dict) -> dict:
@@ -61,6 +90,10 @@ def public_entry(entry: dict) -> dict:
 class App:
     def __init__(self, hosts_path: Path | None = None):
         self.hosts_path = hosts_path
+
+    @property
+    def path(self) -> Path:
+        return Path(self.hosts_path).expanduser().resolve() if self.hosts_path else R.hosts_path().resolve()
 
     def registry(self) -> R.Registry:
         return R.Registry(self.hosts_path)
@@ -84,20 +117,27 @@ class App:
         alias = str(body.get("alias") or "").strip()
         entry = body.get("entry") or {}
         is_new = bool(body.get("is_new"))
+        rename_from = "" if is_new else str(body.get("rename_from") or "").strip()
         if not isinstance(entry, dict):
             raise ApiError(400, "entry 必须是对象")
         with WRITE_LOCK:
             reg = self.registry()
             if not reg.writable:
                 raise ApiError(400, reg.error)
-            if is_new and alias in reg.aliases():
+            aliases = reg.aliases()
+            source = rename_from or alias
+            if not is_new and source not in aliases:
+                raise ApiError(400, f"要编辑的主机 {source} 不存在")
+            if (is_new or source != alias) and alias in aliases:
                 raise ApiError(400, f"别名 {alias} 已存在")
-            if not is_new and alias not in reg.aliases():
-                raise ApiError(400, f"要编辑的主机 {alias} 不存在")
-            errors, warnings = R.validate(alias, entry, reg.aliases(), is_new=is_new)
+            errors, warnings = R.validate(alias, entry, aliases, is_new=is_new)
             if errors:
                 raise ApiError(400, "；".join(errors))
-            reg.upsert(alias, entry)
+            if source != alias:
+                reg.rename(source, alias, entry)
+                warnings.extend(rename_notes(source, alias))
+            else:
+                reg.upsert(alias, entry)
             reg.save()
         return {"ok": True, "warnings": warnings, "state": self.state()}
 
@@ -242,6 +282,10 @@ class Handler(BaseHTTPRequestHandler):
         got = self.headers.get("X-Token", "")
         return bool(got) and secrets.compare_digest(got, self.server.token)
 
+    def _control_authorized(self) -> bool:
+        got = self.headers.get("X-Control", "")
+        return bool(got) and secrets.compare_digest(got, self.server.control)
+
     def _body(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -290,6 +334,14 @@ class Handler(BaseHTTPRequestHandler):
         if not route.startswith("/api/"):
             self._serve_static()
             return
+        if route == "/api/health":
+            self._json(200, {
+                "ok": True,
+                "pid": os.getpid(),
+                "port": self.server.server_address[1],
+                "hosts": str(self.server.app.path),
+            })
+            return
         if not self._authorized():
             self._error(401, "unauthorized")
             return
@@ -313,6 +365,13 @@ class Handler(BaseHTTPRequestHandler):
             # 先读完请求体再判令牌：401 时若留下未读 body，HTTP/1.1 keep-alive
             # 会把这段字节拼到下一条请求行上，服务端就会看到 "GET" 前面多出一段 JSON。
             body = self._body()
+            if route == "/api/reopen":
+                if not self._control_authorized():
+                    self._error(403, "forbidden")
+                    return
+                opened = bool(webbrowser.open(self.server.ui_url))
+                self._json(200, {"ok": True, "opened": opened})
+                return
             if not self._authorized():
                 self._error(401, "unauthorized")
                 return
@@ -347,10 +406,12 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, app: App, token: str):
+    def __init__(self, address, handler, app: App, token: str, control: str, ui_url: str = ""):
         super().__init__(address, handler)
         self.app = app
         self.token = token
+        self.control = control
+        self.ui_url = ui_url
 
 
 def main(argv: list[str]) -> int:
@@ -370,21 +431,34 @@ def main(argv: list[str]) -> int:
             pass
 
     app = App(Path(args.hosts).expanduser() if args.hosts else None)
-    httpd = Server(("127.0.0.1", args.port), Handler, app, TOKEN)
+    reg = app.registry()
+    existing = R.web_ui_running(reg.path)
+    if existing["running"]:
+        if not args.no_open and R.reopen_web_ui(reg.path):
+            print("已有 Web 服务在运行，已打开页面。", flush=True)
+            return 0
+        print("同一份清单的 Web 服务已在运行；未启动第二个。" if args.no_open
+              else "同一份清单的 Web 服务已在运行；页面没能重新打开，请使用原页面或先关闭旧服务。", flush=True)
+        return 0 if args.no_open else 1
+
+    httpd = Server(("127.0.0.1", args.port), Handler, app, TOKEN, CONTROL)
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/#token={TOKEN}"
-    reg = app.registry()
-    print("ssh-marshal 主机清单", flush=True)
-    print(f"  地址：{url}", flush=True)
-    print(f"  凭据：{reg.path}" + (f"（{reg.error}）" if reg.error else ""), flush=True)
-    print("  按 Ctrl+C 或页面右上角「关闭服务」结束。", flush=True)
-    if not args.no_open:
-        webbrowser.open(url)
+    httpd.ui_url = url
     try:
+        opened = None
+        if not args.no_open:
+            opened = bool(webbrowser.open(url))
+        R.write_web_ui_status(reg.path, port, CONTROL, opened=opened)
+        print("ssh-marshal 主机清单", flush=True)
+        print(f"  地址：{url}", flush=True)
+        print(f"  凭据：{reg.path}" + (f"（{reg.error}）" if reg.error else ""), flush=True)
+        print("  按 Ctrl+C 或页面右上角「关闭服务」结束。", flush=True)
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        R.clear_web_ui_status(reg.path)
         httpd.server_close()
     print("已关闭。")
     return 0

@@ -3,7 +3,7 @@
 # ///
 """gen_hosts.py —— 命令行薄壳：扫描本机 ~/.ssh，可选并入主机清单。
 
-日常维护请用图形界面 `uv run hosts_gui.py`；这个脚本留给无界面环境或批处理。
+日常维护请用 Web 界面 `uv run hosts_web.py`；这个脚本留给无界面环境或批处理。
 扫描与写入逻辑都在 `hostreg.py`，这里只负责打印与参数解析。
 
 用法：
@@ -58,7 +58,7 @@ def main() -> int:
             print(f"  - {cand.alias:<16} {cand.entry['address']}:{cand.entry['port']:<6} 跳过：{'；'.join(cand.reasons)}")
 
     if not args.merge:
-        print("\n只列出，没有写任何文件。要并入就加 --merge，或用界面：uv run hosts_gui.py")
+        print("\n只列出，没有写任何文件。要并入就加 --merge，或用 Web 界面：uv run hosts_web.py")
         return 0
     if not importable:
         print("\n没有可导入的新主机。")

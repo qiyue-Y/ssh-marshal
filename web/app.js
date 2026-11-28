@@ -261,7 +261,6 @@ function fillForm(host) {
   const entry = host || {};
   const flags = entry.flags || { disabled: false, critical: false, xfer: true, elevate: false };
   els.alias.value = host ? host.alias : '';
-  els.alias.disabled = Boolean(host);
   els.address.value = entry.address || '';
   els.port.value = String(entry.port || 22);
   els.username.value = entry.username || '';
@@ -309,6 +308,7 @@ function hideForm() {
 function readForm() {
   return {
     alias: els.alias.value.trim(),
+    rename_from: state.creating ? '' : state.selected || '',
     entry: {
       address: els.address.value.trim(),
       port: els.port.value.trim() || '22',
@@ -414,7 +414,7 @@ function fillFingerprint(fingerprint) {
 /* ---------------------------------------------------------------- actions */
 async function saveHost() {
   if (state.busy) return;
-  const { alias, entry } = readForm();
+  const { alias, rename_from: renameFrom, entry } = readForm();
   if (!alias) {
     toast('别名不能为空', 'error');
     els.alias.focus();
@@ -424,7 +424,7 @@ async function saveHost() {
   try {
     const data = await api('/api/hosts', {
       method: 'POST',
-      body: { alias, entry, is_new: state.creating },
+      body: { alias, entry, is_new: state.creating, rename_from: renameFrom },
     });
     state.creating = false;
     state.selected = alias;
@@ -438,7 +438,7 @@ async function saveHost() {
     if (data.warnings && data.warnings.length) children.push(resultNote(`提示：${data.warnings.join('；')}`));
     showResult('已保存', children);
     if (!children.length) els.resultPanel.hidden = true;
-    toast(`已保存 ${alias}。`, 'success');
+    toast(renameFrom && renameFrom !== alias ? `已改名 ${renameFrom} → ${alias}。` : `已保存 ${alias}。`, 'success');
   } catch (error) {
     toast(error.message, 'error');
   } finally {

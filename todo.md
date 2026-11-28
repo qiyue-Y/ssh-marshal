@@ -217,25 +217,25 @@
 
 ---
 
-## P2-1b 主机清单可视化编辑（hosts_gui.py）
+## P2-1b 主机清单可视化编辑（hosts_web.py）
 
 **状态：已完成（2026-11-09）**
 
 **交付**
-- `hostreg.py`：凭据文件的唯一写入口——读取/校验/原子写/保存前备份（留最近 10 份）/保留 `_` 注释与未知字段/扫描 known_hosts 与 ssh config 出候选。
-- `ssh_probe.py`：指纹探测、私钥加载、一次性连测，从 `ssh_marshal.py` 抽出，GUI 不再反向依赖服务模块；探测仍只做密钥交换、不发凭据。
-- `hosts_gui.py`：tkinter 窗口——列表 + 表单、增改复制删、停用开关、探测指纹并确认、测试连接、从 known_hosts/ssh config 勾选导入；密码留空即不改、不回填明文。
+- `hostreg.py`：凭据文件的唯一写入口——读取/校验/原子写（不生成备份）/保留 `_` 注释与未知字段/扫描 known_hosts 与 ssh config 出候选。
+- `ssh_probe.py`：指纹探测、私钥加载、一次性连测，从 `ssh_marshal.py` 抽出，Web 界面不再反向依赖服务模块；探测仍只做密钥交换、不发凭据。
+- `hosts_web.py` + `web/`：浏览器界面——列表 + 表单、增改复制删、停用开关、探测指纹（结果直接填入）、测试连接、从 known_hosts/ssh config 勾选导入；密码留空即不改、不回填明文。
 - `gen_hosts.py`：退成 `hostreg` 的薄壳 CLI（默认只列候选，`--merge` 才写）。
 - `ssh_marshal.py`：只读凭据不变；探测相关函数改为从 `ssh_probe` 引入，`test_connect_refusals` 的 mock 点仍有效。
 
 **验证**
-- `test_hostreg.py` 18 例全绿（原子写、备份轮转、坏 JSON 拒写、password 留空保留、未知字段保留、扫描与去重）。
+- `test_hostreg.py` 20 例全绿（原子写、坏 JSON 拒写、password 留空保留、未知字段保留、扫描与去重、Web 状态文件）。
 - 原有 95 + 36 例、冒烟测试全绿（抽取后无回归）。
-- `hosts_gui.py --selftest` 能构造窗口并自动关闭；用演示数据实际打开截图核对过布局（标记列、表单、状态栏无裁切）。
-- 真机未做写操作验证：GUI 保存路径由 `test_hostreg.py` 的临时文件用例覆盖，未对真实 `ssh_marshal_hosts.json` 做写测试。
+- Web 界面用演示数据在 1440/1024/768/390 截图核对过布局（列表、表单、探测结果位置、按钮间距）。
+- 真机未做写操作验证：Web 保存路径由 `test_hostreg.py` 的临时文件用例覆盖，未对真实 `ssh_marshal_hosts.json` 做写测试。
 
 **边界**
-- GUI 不是 MCP 工具，AI 碰不到凭据文件；服务进程仍然只读。
+- Web 界面不是 MCP 工具，AI 碰不到凭据文件；`hosts_gui` 工具只负责拉起/判活。服务进程仍然只读。
 - 不做命令执行、日志、批量运维。
 - 「测试连接」只跑固定探针，不开放任意命令输入。
 

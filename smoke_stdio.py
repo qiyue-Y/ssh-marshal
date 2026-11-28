@@ -164,7 +164,7 @@ def main() -> int:
                 if key not in payload:
                     failures.append(f"hosts_gui 返回缺 {key}")
             if payload.get("launched"):
-                failures.append("action=status 不该拉起窗口")
+                failures.append("action=status 不该拉起服务或页面")
             leaked = find_secret_fields(payload)
             if leaked:
                 failures.append(f"hosts_gui 输出了密钥字段：{', '.join(leaked)}")
