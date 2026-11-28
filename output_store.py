@@ -44,11 +44,16 @@ def _start_at_newline(data: bytes) -> bytes:
 
 
 class _Band:
-    """一条流的内存带：全文进文件，内存只留头 head_budget 与尾 tail_budget。"""
+    """一条流的内存带：全文进文件，内存只留头 head_budget 与尾 tail_budget。
 
-    def __init__(self, head_budget: int, tail_budget: int) -> None:
+    总量不超过 full_budget 时整条保留 —— 短输出直接内联，不裁剪也不用回捞；
+    full_budget 缺省等于 head+tail（旧行为，大头尾原样生效）。
+    """
+
+    def __init__(self, head_budget: int, tail_budget: int, full_budget: int | None = None) -> None:
         self.head_budget = head_budget
         self.tail_budget = tail_budget
+        self.full_budget = head_budget + tail_budget if full_budget is None else full_budget
         self.total = 0
         self.lines = 0
         self._full: list[bytes] = []
@@ -64,8 +69,8 @@ class _Band:
             self._push_tail(chunk)
             return
         self._full.append(chunk)
-        if self.total <= self.head_budget + self.tail_budget:
-            return  # 没超预算，整条留在内存里，一次都不用丢
+        if self.total <= self.full_budget:
+            return  # 没超全量阈值，整条留在内存里，一次都不用丢
         # 先收进 _full 再定型，否则「单个 chunk 就超预算」（SSH 一次 recv 就是 64KB）
         # 会把这一段头部数据直接丢掉
         blob = b"".join(self._full)
@@ -106,7 +111,7 @@ class _Band:
 class Spill:
     """一次执行的落盘句柄 + 两条内存带。文件按需创建，空输出不留空文件。"""
 
-    def __init__(self, root: Path, run_id: str, file_cap: int, budgets: dict[str, tuple[int, int]]) -> None:
+    def __init__(self, root: Path, run_id: str, file_cap: int, budgets: dict[str, tuple[int, int, int]]) -> None:
         self.run_id = run_id
         self.file_cap = file_cap
         self.root = root

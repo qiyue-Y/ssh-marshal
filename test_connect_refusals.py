@@ -467,7 +467,7 @@ class Elevate(unittest.TestCase):
 
         fake_client = mock.Mock()
         fake_client.get_transport.return_value = mock.Mock(is_active=lambda: True, open_session=lambda: FakeChan())
-        spill = OS.Spill(M.OUTPUT_ROOT, "elevatestdin", 4096, {"out": (256, 256), "err": (256, 256)})
+        spill = OS.Spill(M.OUTPUT_ROOT, "elevatestdin", 4096, {"out": (256, 256, 512), "err": (256, 256, 512)})
         with mock.patch.object(M.POOL, "client", return_value=fake_client):
             M.run_command(cred, WRONG_FP, "id", "~", 5, 5, spill, elevate=True)
 
@@ -727,29 +727,50 @@ class DetachWiring(unittest.TestCase):
         self.assertFalse(tail["truncated"])
 
 
-class ResponseSize(unittest.TestCase):
-    """回显治理（2026-10-14）：exec 命令回显超长截尾；list_hosts 有 brief 模式。"""
+class ResponseEnvelope(unittest.TestCase):
+    """响应信封（2026-11-28）：不回显 command；空值与默认值字段不出现；brief 模式保留。"""
 
-    def test_long_command_echo_is_truncated(self):
-        write_hosts({"100": dict(PINNED)})
-        long_cmd = "echo " + "x" * 400
-        with mock.patch.object(M, "run_command", fake_run(0)):
-            res = M.execute("100", long_cmd)
-        self.assertIn("截断", res["command"])
-        self.assertLess(len(res["command"]), len(long_cmd))
-        self.assertTrue(res["command"].startswith("echo x"))
-
-    def test_short_command_echo_is_untouched(self):
+    def test_exec_response_has_no_command_echo(self):
         write_hosts({"100": dict(PINNED)})
         with mock.patch.object(M, "run_command", fake_run(0)):
             res = M.execute("100", "uptime")
-        self.assertEqual(res["command"], "uptime")
+        self.assertNotIn("command", res, "调用方刚发过的命令不该回显")
+        self.assertNotIn("stdout", res, "空 stdout 只靠 exit_code/stderr 表达")
+        self.assertEqual(res["exit_code"], 2)
+        self.assertIn("stderr", res)
 
-    def test_long_command_blocked_response_is_truncated_too(self):
+    def test_default_valued_fields_are_omitted(self):
+        write_hosts({"100": dict(PINNED)})
+        with mock.patch.object(M, "run_command", fake_run(0)):
+            res = M.execute("100", "uptime")
+        for key in ("truncated", "timed_out", "output", "read_full", "cwd_after", "elevated", "forced_rule"):
+            self.assertNotIn(key, res)
+        self.assertIn("cwd_before", res)
+
+    def test_medium_output_is_fully_inlined(self):
+        """12KB 落在 16KB 全量阈值内：整条给，不出 truncated/output/read_full。"""
+        write_hosts({"100": dict(PINNED)})
+        with mock.patch.object(M, "run_command", fake_run(600)):
+            res = M.execute("100", "make -j8")
+        self.assertIn("stdout", res)
+        self.assertNotIn("truncated", res)
+        self.assertNotIn("read_full", res)
+        self.assertIn("row 00600 compiling", res["stdout"])
+        self.assertNotIn("省略", res["stdout"])
+
+    def test_truncated_response_keeps_stats_and_read_full(self):
+        write_hosts({"100": dict(PINNED)})
+        with mock.patch.object(M, "run_command", fake_run(5000)):
+            res = M.execute("100", "make -j8")
+        self.assertTrue(res["truncated"])
+        self.assertIn("output", res, "截断时字节/行数统计才不可推导，必须给")
+        self.assertIn("read_full", res)
+
+    def test_blocked_response_has_no_command_echo(self):
         write_hosts({"admin": dict(ROOT_PINNED)})
         res = M.execute("admin", "mkfs.ext4 /dev/sda1 " + "y" * 400)
         self.assertTrue(res.get("blocked"))
-        self.assertIn("截断", res["command"])
+        self.assertNotIn("command", res)
 
     def test_list_hosts_brief_drops_big_blocks(self):
         write_hosts({"100": dict(PINNED)})

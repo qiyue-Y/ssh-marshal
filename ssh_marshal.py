@@ -100,8 +100,8 @@ AUDIT_PATH = _path_from_env("SSHMARSHAL_AUDIT", HOME_DIR / "audit" / "ssh-marsha
 OUTPUT_ROOT = _path_from_env("SSHMARSHAL_OUTPUT", HOME_DIR / "output")
 
 # 回给 Agent 的内联预算（字节）。全文在 output/ 里，想看随时 read_output 捞。
-INLINE_OUT = (4096, 4096)
-INLINE_ERR = (1024, 2048)
+INLINE_OUT = (4096, 4096, 16384)  # (头, 尾, 全量阈值)：≤16KB 整条内联，超了只回头尾各 4KB
+INLINE_ERR = (1024, 2048, 3072)
 BACKUPS_DIRNAME = ".sshmarshal-backups"
 OUTPUT_KEEP_RUNS = int(os.environ.get("SSHMARSHAL_OUTPUT_KEEP_RUNS", "200"))
 OUTPUT_KEEP_BYTES = int(os.environ.get("SSHMARSHAL_OUTPUT_KEEP_BYTES", str(500 * 1024 * 1024)))
@@ -1095,7 +1095,7 @@ def execute(alias: str, command: str, cwd: str | None = None, idle_timeout: floa
     if backup_dir:
         executed["backup"] = backup_dir
     audit(executed)
-    out = _ok(alias, command, res, start_cwd, end_cwd, hit.rule if hit else None, elevate, cred.elevate_user or "root")
+    out = _ok(alias, res, start_cwd, end_cwd, hit.rule if hit else None, elevate, cred.elevate_user or "root")
     if force:
         out["force_reason"] = _force_reason(force_reason)
     if backup_dir:
@@ -1103,35 +1103,29 @@ def execute(alias: str, command: str, cwd: str | None = None, idle_timeout: floa
     return out
 
 
-ECHO_LIMIT = 200  # 回显给调用方的命令原文上限；全文始终在审计里，回显只是给对照用
-
-
-def _echo(command: str) -> str:
-    if len(command) <= ECHO_LIMIT:
-        return command
-    return f"{command[:ECHO_LIMIT]}…[截断，全文 {len(command)} 字符，见 audit_tail]"
-
-
 def _block(alias: str, command: str, reason: str, rule: str, hint: str) -> dict:
     try:  # 被拒也要留痕，但拒本身不需要 fail closed
         audit({"host": alias, "command": command, "event": "blocked", "reason": reason, "rule": rule})
     except OSError as exc:
         log(f"审计写入失败：{exc}")
-    return {"host": alias, "command": _echo(command), "blocked": True, "reason": reason, "rule": rule, "hint": hint}
+    return {"host": alias, "blocked": True, "reason": reason, "rule": rule, "hint": hint}
 
 
-def _ok(alias, command, res: RunResult, cwd_before, cwd_after, forced_rule: str | None = None, elevate: bool = False, ran_as: str = "root") -> dict:
-    payload = {
-        "host": alias,
-        "command": _echo(command),
-        "exit_code": res.exit_code,
-        "stdout": res.stdout,
-        "stderr": res.stderr,
-        "truncated": res.truncated,
-        "timed_out": res.timed_out,
-        "cwd_before": cwd_before,
-        "cwd_after": cwd_after,
-    }
+def _ok(alias, res: RunResult, cwd_before, cwd_after, forced_rule: str | None = None, elevate: bool = False, ran_as: str = "root") -> dict:
+    # 不回显 command：调用方刚发过，全文在审计里、output_id 可做锚点。
+    # 空值与默认值字段一律不出现，响应只留本次真正携带信息的部分（上下文成本实测见 SUGGESTION.md）。
+    payload = {"host": alias, "exit_code": res.exit_code}
+    if res.stdout:
+        payload["stdout"] = res.stdout
+    if res.stderr:
+        payload["stderr"] = res.stderr
+    if res.truncated:
+        payload["truncated"] = True
+    if res.timed_out:
+        payload["timed_out"] = res.timed_out
+    payload["cwd_before"] = cwd_before
+    if cwd_after != cwd_before:
+        payload["cwd_after"] = cwd_after
     if elevate:
         payload["elevated"] = True
         payload["ran_as"] = ran_as
@@ -1141,8 +1135,8 @@ def _ok(alias, command, res: RunResult, cwd_before, cwd_after, forced_rule: str 
         payload["hint"] = "撞到 max_duration：命令可能还在远端跑，已收的部分可 read_output 捞；要等完就传更大的 max_duration"
     if res.output_id:
         payload["output_id"] = res.output_id
-        payload["output"] = res.stats
         if res.truncated:
+            payload["output"] = res.stats
             payload["read_full"] = (
                 f"内联已按行边界省略，全文在本地日志：read_output(output_id={res.output_id}, "
                 "mode='grep', pattern='error') 拿行号，再用 mode='lines', start, end 取上下文"
@@ -1188,7 +1182,7 @@ def _tool_list_hosts(brief: bool = False) -> dict:
                     "idle_timeout_s": guard.idle_timeout_s,
                     "max_duration_s": f"{guard.max_duration_s}（缺省，可被 max_duration 参数任意覆盖，不再夹制）",
                     "max_output_file_bytes": guard.max_output_bytes,
-                    "inline_output": f"stdout 头 {INLINE_OUT[0]}B + 尾 {INLINE_OUT[1]}B（stderr {INLINE_ERR[0]}/{INLINE_ERR[1]}），全文用 read_output(output_id) 回捞",
+                    "inline_output": f"stdout ≤{INLINE_OUT[2]}B 全量内联，超了回头 {INLINE_OUT[0]}B + 尾 {INLINE_OUT[1]}B（stderr 阈值 {INLINE_ERR[2]}B，超了 {INLINE_ERR[0]}/{INLINE_ERR[1]}），全文用 read_output(output_id) 回捞",
                     "output_retention": f"{OUTPUT_KEEP_DAYS} 天 / ≤{OUTPUT_KEEP_RUNS} run / ≤{OUTPUT_KEEP_BYTES // 1048576}MB",
                     "audit_retention": f"{AUDIT_KEEP_DAYS} 天（按天轮转，SSHMARSHAL_AUDIT_KEEP_DAYS）",
                     "xfer_dir": str(xfer_dir(guard)),
@@ -1917,7 +1911,7 @@ def _start_job(alias: str, command: str, cred: HostCred, pin: str, guard, start_
                    "job_id": job_id, "reason": parsed["result"], "stderr": res.stderr[:300]})
         except OSError:
             pass
-        return {"host": alias, "command": _echo(shown), "job_id": job_id, "detached": True, "state": "unknown",
+        return {"host": alias, "job_id": job_id, "detached": True, "state": "unknown",
                 "error": "job_not_started", "reason": parsed["result"], "exit_code": res.exit_code,
                 "stdout": res.stdout[:300], "stderr": res.stderr[:300],
                 "hint": "远端没写出 pid 文件：看 stdout/stderr（NOPID 多为目录不可写或缺 setsid/nohup）"}
@@ -1926,7 +1920,7 @@ def _start_job(alias: str, command: str, cred: HostCred, pin: str, guard, start_
     if backup:
         started["backup"] = backup
     audit(started)
-    out = {"host": alias, "command": _echo(shown), "job_id": job_id, "detached": True, "state": "running",
+    out = {"host": alias, "job_id": job_id, "detached": True, "state": "running",
            "pid": parsed.get("pid"), "cwd": start_cwd,
            "next": f"job_status(host='{alias}', job_id='{job_id}') 看状态与输出；job_kill 停它"}
     if backup:

@@ -20,8 +20,9 @@ ROOT = Path(tempfile.mkdtemp(prefix="ssh-marshal-output-test-"))
 RUN = "0f1e2d3c4b5a6978"  # 32 位以外的合法十六进制串也行，fullmatch 只看形态
 
 
-def make(run_id: str = RUN, file_cap: int = 1 << 20, head: int = 4096, tail: int = 4096, err_head: int = 1024, err_tail: int = 2048) -> OS.Spill:
-    return OS.Spill(ROOT, run_id, file_cap, {"out": (head, tail), "err": (err_head, err_tail)})
+def make(run_id: str = RUN, file_cap: int = 1 << 20, head: int = 4096, tail: int = 4096, err_head: int = 1024, err_tail: int = 2048, full: int | None = None) -> OS.Spill:
+    full = head + tail if full is None else full
+    return OS.Spill(ROOT, run_id, file_cap, {"out": (head, tail, full), "err": (err_head, err_tail, err_head + err_tail)})
 
 
 def feed_lines(spill: OS.Spill, count: int, template: str = "line-{n:06d}-" + "x" * 40) -> tuple[int, bytes]:
@@ -45,6 +46,30 @@ class InlineBand(unittest.TestCase):
         self.assertIn("line-000001", text)
         self.assertIn("line-000005", text)
         self.assertNotIn("省略", text)
+
+    def test_output_under_full_budget_is_inlined_whole(self):
+        """全量阈值与头尾预算解耦：不超 full 就整条给，不裁剪（短输出免回捞）。"""
+        spill = make(head=1024, tail=1024, full=8192)
+        total, last_line = feed_lines(spill, 100)
+        self.assertGreater(total, 2048, "要超过头+尾预算才对解耦有区分度")
+        self.assertLess(total, 8192)
+        spill.close()
+        text = spill.inline("out")
+        self.assertFalse(spill.clipped)
+        self.assertIn("line-000001", text)
+        self.assertIn(last_line.decode().strip(), text)
+        self.assertNotIn("省略", text)
+
+    def test_output_past_full_budget_clips_to_head_and_tail_only(self):
+        spill = make(head=1024, tail=1024, full=8192)
+        total, last_line = feed_lines(spill, 500)
+        self.assertGreater(total, 8192)
+        spill.close()
+        text = spill.inline("out")
+        self.assertTrue(spill.clipped)
+        self.assertIn("省略", text)
+        self.assertIn(last_line.decode().strip(), text)
+        self.assertLess(len(text.encode()), 1024 + 1024 + 200, "超全量阈值后只回头尾预算，不跟着阈值涨")
 
     def test_large_output_keeps_both_ends_on_line_boundaries(self):
         spill = make(head=2048, tail=2048)
@@ -259,7 +284,7 @@ class Rotation(unittest.TestCase):
         """
         base = time.time()
         for i, rid in enumerate(ids):
-            spill = OS.Spill(root, rid, 1 << 20, {"out": (64, 64), "err": (64, 64)})
+            spill = OS.Spill(root, rid, 1 << 20, {"out": (64, 64, 128), "err": (64, 64, 128)})
             spill.write("out", b"x" * size)
             spill.close()
             stamp = base - (len(ids) - i) * 60

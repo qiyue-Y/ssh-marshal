@@ -87,7 +87,7 @@ python test_ssh_guard.py
 python test_hostreg.py
 ```
 
-全文日志与回捞的离线用例（同样裸 python，不碰网络；24 例）：
+全文日志与回捞的离线用例（同样裸 python，不碰网络；26 例）：
 
 ```powershell
 python test_output_store.py
@@ -395,7 +395,9 @@ SFTP 以登录用户身份写 `/root`、`/etc` 实测都是 `Permission denied`�
 5. 66 的传输没验过（真机限定在 100）。它的清单保护由 `guarded_hosts` 点名提供，传输目标检查同样生效。
 6. **`st_size` 不可信的两类都已处理**：`/proc` 这类报 0 的伪文件按「长度未知」读到 EOF 取回（不做远端二次读取的 md5 校验——这类文件两次读取可能天然不同）；`/sys` 这类 stat 报 4096 而实际更短的，`bytes`/`chunks` 报**实际落盘量**。FIFO 直接拒（按 EOF 读会挂住等写者）。
 
-**输出默认只回头尾两截。** `exec` 内联是 stdout 头 4KB + 省略标记 + 尾 4KB（stderr 是 1KB/2KB），全文写进本机 `output/<output_id>.{out,err}.log`；`truncated: true` 时返回值里带 `read_full` 提示怎么用 `read_output`。留尾部是重点 —— `make`/`pip`/`apt` 的失败原因就在最后几行，早先「留头弃尾」会把报错整块丢掉。
+**短输出全量内联，大输出只回头尾两截。** stdout ≤16KB 整条返回；超过才给头 4KB + 省略标记 + 尾 4KB（stderr 阈值 3KB，超了给头 1KB/尾 2KB）。全文始终写进本机 `output/<output_id>.{out,err}.log`；截断时返回值里带 `read_full` 提示怎么用 `read_output`。16KB 这条线是 2026-11-28 按 14 天审计定的：139 次 `exec` 里 97% 输出 ≤8KB、最大 31.7KB，线内全给省一次回捞，线外仍留保险丝。留尾部是重点 —— `make`/`pip`/`apt` 的失败原因就在最后几行，早先「留头弃尾」会把报错整块丢掉。
+
+**响应不回显命令、不带空值。** `exec` 与 `exec(detach=true)` 的返回值里没有 `command`（调用方刚发过，全文在审计里，`output_id`/`job_id` 就是锚点）；空 `stdout`/`stderr`、`truncated`/`timed_out` 为假、cwd 未变、`output` 统计（只在截断时给）等字段一律不出现，失败与变化才占字段。`job_list`/`job_status`/`audit_tail` 里的 `command` 保留——那是回忆（可能是几轮前发的），不是回声。实测同一次小输出调用信封从 562 字符降到 155（省 72%）。
 
 ## 后台任务（detach）
 

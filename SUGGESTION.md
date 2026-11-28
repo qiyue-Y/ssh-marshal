@@ -100,6 +100,8 @@
 
 **已实现（2026-10-14）**：`list_hosts(brief=true)` 去掉每台的 limits 与全量 killlist；exec 回显超 200 字符截尾（标注"全文见 audit_tail"，审计里始终是全文）。第 3 条「输出默认只给摘要」不做——头+尾内联是报错可读性的地基（有实测理由）。
 
+**第二步（2026-11-28）**：exec 与 detach 启动响应彻底去掉 `command` 回显（`job_list`/`job_status`/`audit_tail` 的 command 保留，那是回忆不是回声）；空值与默认值字段（空 stdout/stderr、`truncated:false`、`timed_out:null`、未变化的 `cwd_after`）不再出现；`output` 统计块只在截断时给。同一次小输出调用实测信封 562 → 155 字符（省 72%）；20KB 未截断输出的信封 510 → 103 字符。审计的 `executed` 记录同时带命令全文与 output_id，回查不受影响。
+
 - **现状与痛点**：`list_hosts` 每台机器都重复一整块 `limits` 与 `inline_output` 说明，加上全量 killlist，单次约 2.5KB；本次为查一个 `auth` 字段调了 3 次。`exec` 的响应把调用方发过去的命令**逐字回显**，本次约 25 条命令平均 700 字符，光回显约 17KB。粗估这轮调用返回的字节里 40–55% 是信封与回声，不是信息（量级估算，非精确计量）。
 - **建议做法**：`list_hosts(brief=true)` 或 `fields=` 只回别名/地址/auth/pin_source；把 `limits` 挪到单独工具或只在首次返回。`exec` 加 `echo_command`（默认 `false`，或超过 N 字符时截断）。stdout 超阈值时默认只回摘要 + `output_id`——`read_output` 已经存在，缺的是让它成为默认路径。
 - **预期收益**：长会话里 Agent 的上下文占用显著下降，同样任务能塞进更多轮次。
